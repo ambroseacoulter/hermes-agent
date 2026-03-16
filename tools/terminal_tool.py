@@ -374,6 +374,8 @@ from tools.environments.singularity import SingularityEnvironment as _Singularit
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
+from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
+from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 
 
 # Tool description for LLM
@@ -601,7 +603,19 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                     sandbox_kwargs["ephemeral_disk"] = disk
             except Exception:
                 pass
-        
+
+        has_direct_modal = (
+            (os.getenv("MODAL_TOKEN_ID") and os.getenv("MODAL_TOKEN_SECRET"))
+            or (Path.home() / ".modal.toml").exists()
+        )
+
+        if not has_direct_modal and is_managed_tool_gateway_ready("modal"):
+            return _ManagedModalEnvironment(
+                image=image, cwd=cwd, timeout=timeout,
+                modal_sandbox_kwargs=sandbox_kwargs,
+                persistent_filesystem=persistent, task_id=task_id,
+            )
+
         return _ModalEnvironment(
             image=image, cwd=cwd, timeout=timeout,
             modal_sandbox_kwargs=sandbox_kwargs,

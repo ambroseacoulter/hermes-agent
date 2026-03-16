@@ -133,7 +133,8 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
     """Return the configured cloud browser provider, or None for local mode.
 
     Reads ``config["browser"]["cloud_provider"]`` once and caches the result
-    for the process lifetime.  If unset → local mode (None).
+    for the process lifetime. If unset, fall back to Browserbase when direct
+    or managed Browserbase credentials are available.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
     if _cloud_provider_resolved:
@@ -152,7 +153,30 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 _cached_cloud_provider = _PROVIDER_REGISTRY[provider_key]()
     except Exception as e:
         logger.debug("Could not read cloud_provider from config: %s", e)
+
+    if _cached_cloud_provider is None:
+        fallback_provider = BrowserbaseProvider()
+        if fallback_provider.is_configured():
+            _cached_cloud_provider = fallback_provider
+
     return _cached_cloud_provider
+
+
+def _get_browserbase_config_or_none() -> Optional[Dict[str, Any]]:
+    """Return Browserbase direct or managed config, or None when unavailable."""
+    return BrowserbaseProvider()._get_config_or_none()
+
+
+def _get_browserbase_config() -> Dict[str, Any]:
+    """Return Browserbase config or raise when neither direct nor managed mode is available."""
+    return BrowserbaseProvider()._get_config()
+
+
+def _is_local_mode() -> bool:
+    """Return True when the browser tool will use a local browser backend."""
+    if _get_cdp_override():
+        return False
+    return _get_cloud_provider() is None
 
 
 def _socket_safe_tmpdir() -> str:

@@ -32,9 +32,12 @@ import json
 import logging
 import os
 import datetime
+from contextlib import contextmanager
 from typing import Dict, Any, Optional, Union
+from urllib.parse import urlparse
 import fal_client
 from tools.debug_helpers import DebugSession
+from tools.managed_tool_gateway import resolve_managed_tool_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,67 @@ VALID_OUTPUT_FORMATS = ["jpeg", "png"]
 VALID_ACCELERATION_MODES = ["none", "regular", "high"]
 
 _debug = DebugSession("image_tools", env_var="IMAGE_TOOLS_DEBUG")
+
+
+def _resolve_managed_fal_gateway():
+    """Return managed fal-queue gateway config when direct FAL credentials are absent."""
+    if os.getenv("FAL_KEY"):
+        return None
+    return resolve_managed_tool_gateway("fal-queue")
+
+
+@contextmanager
+def _override_fal_queue_host(queue_run_origin: Optional[str]):
+    """Temporarily point fal_client at the managed queue origin."""
+    if not queue_run_origin:
+        yield
+        return
+
+    parsed_origin = urlparse(queue_run_origin)
+    queue_run_host = parsed_origin.netloc or parsed_origin.path
+    if not queue_run_host:
+        yield
+        return
+
+    previous_env = os.environ.get("FAL_QUEUE_RUN_HOST")
+    previous_module_host = getattr(getattr(fal_client, "client", None), "FAL_QUEUE_RUN_HOST", None)
+    previous_module_url = getattr(getattr(fal_client, "client", None), "QUEUE_RUN_URL", None)
+
+    os.environ["FAL_QUEUE_RUN_HOST"] = queue_run_host
+    if hasattr(getattr(fal_client, "client", None), "FAL_QUEUE_RUN_HOST"):
+        fal_client.client.FAL_QUEUE_RUN_HOST = queue_run_host
+    if hasattr(getattr(fal_client, "client", None), "QUEUE_RUN_URL"):
+        fal_client.client.QUEUE_RUN_URL = queue_run_origin.rstrip("/")
+
+    try:
+        yield
+    finally:
+        if previous_env is None:
+            os.environ.pop("FAL_QUEUE_RUN_HOST", None)
+        else:
+            os.environ["FAL_QUEUE_RUN_HOST"] = previous_env
+
+        if hasattr(getattr(fal_client, "client", None), "FAL_QUEUE_RUN_HOST"):
+            fal_client.client.FAL_QUEUE_RUN_HOST = previous_module_host
+        if hasattr(getattr(fal_client, "client", None), "QUEUE_RUN_URL"):
+            fal_client.client.QUEUE_RUN_URL = previous_module_url
+
+
+def _submit_fal_request(model: str, arguments: Dict[str, Any]):
+    """Submit a FAL request using direct credentials or the managed queue gateway."""
+    managed_gateway = _resolve_managed_fal_gateway()
+    if managed_gateway is None:
+        return fal_client.submit(model, arguments=arguments)
+
+    headers = {
+        "Authorization": f"Key {managed_gateway.nous_user_token}",
+    }
+    with _override_fal_queue_host(managed_gateway.gateway_origin):
+        return fal_client.submit(
+            model,
+            arguments=arguments,
+            headers=headers,
+        )
 
 
 def _validate_parameters(
@@ -186,9 +250,9 @@ def _upscale_image(image_url: str, original_prompt: str) -> Dict[str, Any]:
         # The async API (submit_async) caches a global httpx.AsyncClient via
         # @cached_property, which breaks when asyncio.run() destroys the loop
         # between calls (gateway thread-pool pattern).
-        handler = fal_client.submit(
+        handler = _submit_fal_request(
             UPSCALER_MODEL,
-            arguments=upscaler_arguments
+            arguments=upscaler_arguments,
         )
         
         # Get the upscaled result (sync — blocks until done)
@@ -280,8 +344,10 @@ def image_generate_tool(
             raise ValueError("Prompt is required and must be a non-empty string")
         
         # Check API key availability
-        if not os.getenv("FAL_KEY"):
-            raise ValueError("FAL_KEY environment variable not set")
+        if not (os.getenv("FAL_KEY") or _resolve_managed_fal_gateway()):
+            raise ValueError(
+                "FAL_KEY environment variable not set and managed FAL gateway is unavailable"
+            )
         
         # Validate other parameters
         validated_params = _validate_parameters(
@@ -312,9 +378,9 @@ def image_generate_tool(
         logger.info("  Guidance: %s", validated_params['guidance_scale'])
         
         # Submit request to FAL.ai using sync API (avoids cached event loop issues)
-        handler = fal_client.submit(
+        handler = _submit_fal_request(
             DEFAULT_MODEL,
-            arguments=arguments
+            arguments=arguments,
         )
         
         # Get the result (sync — blocks until done)
@@ -400,7 +466,7 @@ def check_fal_api_key() -> bool:
     Returns:
         bool: True if API key is set, False otherwise
     """
-    return bool(os.getenv("FAL_KEY"))
+    return bool(os.getenv("FAL_KEY") or _resolve_managed_fal_gateway())
 
 
 def check_image_generation_requirements() -> bool:
@@ -556,7 +622,7 @@ registry.register(
     schema=IMAGE_GENERATE_SCHEMA,
     handler=_handle_image_generate,
     check_fn=check_image_generation_requirements,
-    requires_env=["FAL_KEY"],
+    requires_env=[],
     is_async=False,  # Switched to sync fal_client API to fix "Event loop is closed" in gateway
     emoji="🎨",
 )

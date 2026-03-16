@@ -3,11 +3,12 @@
 import logging
 import os
 import uuid
-from typing import Dict
+from typing import Any, Dict, Optional
 
 import requests
 
 from tools.browser_providers.base import CloudBrowserProvider
+from tools.managed_tool_gateway import resolve_managed_tool_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -19,25 +20,42 @@ class BrowserbaseProvider(CloudBrowserProvider):
         return "Browserbase"
 
     def is_configured(self) -> bool:
-        return bool(
-            os.environ.get("BROWSERBASE_API_KEY")
-            and os.environ.get("BROWSERBASE_PROJECT_ID")
-        )
+        return self._get_config_or_none() is not None
 
     # ------------------------------------------------------------------
     # Session lifecycle
     # ------------------------------------------------------------------
 
-    def _get_config(self) -> Dict[str, str]:
+    def _get_config_or_none(self) -> Optional[Dict[str, Any]]:
         api_key = os.environ.get("BROWSERBASE_API_KEY")
         project_id = os.environ.get("BROWSERBASE_PROJECT_ID")
-        if not api_key or not project_id:
+        if api_key and project_id:
+            return {
+                "api_key": api_key,
+                "project_id": project_id,
+                "base_url": os.environ.get("BROWSERBASE_BASE_URL", "https://api.browserbase.com").rstrip("/"),
+                "managed_mode": False,
+            }
+
+        managed = resolve_managed_tool_gateway("browserbase")
+        if managed is None:
+            return None
+
+        return {
+            "api_key": managed.nous_user_token,
+            "project_id": "managed",
+            "base_url": managed.gateway_origin.rstrip("/"),
+            "managed_mode": True,
+        }
+
+    def _get_config(self) -> Dict[str, Any]:
+        config = self._get_config_or_none()
+        if config is None:
             raise ValueError(
-                "BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID environment "
-                "variables are required.  Get your credentials at "
-                "https://browserbase.com"
+                "Browserbase requires either direct BROWSERBASE_API_KEY/BROWSERBASE_PROJECT_ID credentials "
+                "or a managed Browserbase gateway configuration."
             )
-        return {"api_key": api_key, "project_id": project_id}
+        return config
 
     def create_session(self, task_id: str) -> Dict[str, object]:
         config = self._get_config()
@@ -81,7 +99,7 @@ class BrowserbaseProvider(CloudBrowserProvider):
             "X-BB-API-Key": config["api_key"],
         }
         response = requests.post(
-            "https://api.browserbase.com/v1/sessions",
+            f"{config['base_url']}/v1/sessions",
             headers=headers,
             json=session_config,
             timeout=30,
@@ -100,7 +118,7 @@ class BrowserbaseProvider(CloudBrowserProvider):
                 )
                 session_config.pop("keepAlive", None)
                 response = requests.post(
-                    "https://api.browserbase.com/v1/sessions",
+                    f"{config['base_url']}/v1/sessions",
                     headers=headers,
                     json=session_config,
                     timeout=30,
@@ -114,7 +132,7 @@ class BrowserbaseProvider(CloudBrowserProvider):
                 )
                 session_config.pop("proxies", None)
                 response = requests.post(
-                    "https://api.browserbase.com/v1/sessions",
+                    f"{config['base_url']}/v1/sessions",
                     headers=headers,
                     json=session_config,
                     timeout=30,
@@ -157,7 +175,7 @@ class BrowserbaseProvider(CloudBrowserProvider):
 
         try:
             response = requests.post(
-                f"https://api.browserbase.com/v1/sessions/{session_id}",
+                f"{config['base_url']}/v1/sessions/{session_id}",
                 headers={
                     "X-BB-API-Key": config["api_key"],
                     "Content-Type": "application/json",
@@ -184,20 +202,19 @@ class BrowserbaseProvider(CloudBrowserProvider):
             return False
 
     def emergency_cleanup(self, session_id: str) -> None:
-        api_key = os.environ.get("BROWSERBASE_API_KEY")
-        project_id = os.environ.get("BROWSERBASE_PROJECT_ID")
-        if not api_key or not project_id:
+        config = self._get_config_or_none()
+        if config is None:
             logger.warning("Cannot emergency-cleanup Browserbase session %s — missing credentials", session_id)
             return
         try:
             requests.post(
-                f"https://api.browserbase.com/v1/sessions/{session_id}",
+                f"{config['base_url']}/v1/sessions/{session_id}",
                 headers={
-                    "X-BB-API-Key": api_key,
+                    "X-BB-API-Key": config["api_key"],
                     "Content-Type": "application/json",
                 },
                 json={
-                    "projectId": project_id,
+                    "projectId": config["project_id"],
                     "status": "REQUEST_RELEASE",
                 },
                 timeout=5,

@@ -34,8 +34,10 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
+from tools.managed_tool_gateway import resolve_managed_tool_gateway
 
 # ---------------------------------------------------------------------------
 # Lazy imports -- providers are imported only when actually used to avoid
@@ -232,9 +234,7 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     Returns:
         Path to the saved audio file.
     """
-    api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "")
-    if not api_key:
-        raise ValueError("VOICE_TOOLS_OPENAI_KEY not set. Get one at https://platform.openai.com/api-keys")
+    api_key, base_url = _resolve_openai_audio_client_config()
 
     oai_config = tts_config.get("openai", {})
     model = oai_config.get("model", DEFAULT_OPENAI_MODEL)
@@ -247,7 +247,7 @@ def _generate_openai_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         response_format = "mp3"
 
     OpenAIClient = _import_openai_client()
-    client = OpenAIClient(api_key=api_key, base_url="https://api.openai.com/v1")
+    client = OpenAIClient(api_key=api_key, base_url=base_url)
     response = client.audio.speech.create(
         model=model,
         voice=voice,
@@ -537,13 +537,35 @@ def check_tts_requirements() -> bool:
         pass
     try:
         _import_openai_client()
-        if os.getenv("VOICE_TOOLS_OPENAI_KEY"):
+        if _has_openai_audio_backend():
             return True
     except ImportError:
         pass
     if _check_neutts_available():
         return True
     return False
+
+
+def _resolve_openai_audio_client_config() -> tuple[str, str]:
+    """Return direct OpenAI audio config or a managed gateway fallback."""
+    direct_api_key = os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip()
+    if direct_api_key:
+        return direct_api_key, "https://api.openai.com/v1"
+
+    managed_gateway = resolve_managed_tool_gateway("openai-audio")
+    if managed_gateway is None:
+        raise ValueError(
+            "VOICE_TOOLS_OPENAI_KEY not set and managed OpenAI audio gateway is unavailable"
+        )
+
+    return managed_gateway.nous_user_token, urljoin(
+        f"{managed_gateway.gateway_origin.rstrip('/')}/", "v1"
+    )
+
+
+def _has_openai_audio_backend() -> bool:
+    """Return True when OpenAI audio can use direct credentials or the managed gateway."""
+    return bool(os.getenv("VOICE_TOOLS_OPENAI_KEY", "").strip() or resolve_managed_tool_gateway("openai-audio"))
 
 
 # ===========================================================================
