@@ -73,6 +73,7 @@ import yaml
 # profile-private skills under ~/.hermes/profiles/<name>/skills/.
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 SKILLS_DIR = HERMES_HOME / "skills"
+_DEFAULT_SHARED_SKILLS_DIR = SKILLS_DIR
 
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
@@ -91,11 +92,20 @@ def check_skill_manage_requirements() -> bool:
 
 def _get_shared_skills_dir() -> Path:
     try:
-        from runtime_context import get_shared_skills_dir
+        from runtime_context import get_current_runtime
 
-        return get_shared_skills_dir()
+        runtime = get_current_runtime()
+        if runtime is not None:
+            return runtime.shared_skills_dir
     except Exception:
+        pass
+    return _single_user_skills_dir()
+
+
+def _single_user_skills_dir() -> Path:
+    if SKILLS_DIR != _DEFAULT_SHARED_SKILLS_DIR:
         return SKILLS_DIR
+    return Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "skills"
 
 
 def _get_private_skills_dir() -> Optional[Path]:

@@ -3233,21 +3233,38 @@ class GatewayRunner:
 
         source = event.source
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{os.urandom(3).hex()}"
+        registry = self._ensure_runtime_registry()
+        runtime_state = registry.current_runtime()
+        session_key = self._session_key_for_source(source)
 
         # Fire-and-forget the background task
         asyncio.create_task(
-            self._run_background_task(prompt, source, task_id)
+            self._run_background_task(
+                prompt,
+                source,
+                task_id,
+                profile_name=runtime_state.profile_name,
+                session_key=session_key,
+            )
         )
 
         preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
         return f'🔄 Background task started: "{preview}"\nTask ID: {task_id}\nYou can keep chatting — results will appear when done.'
 
     async def _run_background_task(
-        self, prompt: str, source: "SessionSource", task_id: str
+        self,
+        prompt: str,
+        source: "SessionSource",
+        task_id: str,
+        *,
+        profile_name: str | None = None,
+        session_key: str | None = None,
     ) -> None:
         """Execute a background agent task and deliver the result to the chat."""
         from run_agent import AIAgent
 
+        registry = self._ensure_runtime_registry()
+        runtime_state = registry.get_runtime(profile_name)
         adapter = self.adapters.get(source.platform)
         if not adapter:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
@@ -3256,96 +3273,110 @@ class GatewayRunner:
         _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
 
         try:
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-            if not runtime_kwargs.get("api_key"):
-                await adapter.send(
-                    source.chat_id,
-                    f"❌ Background task {task_id} failed: no provider credentials configured.",
-                    metadata=_thread_metadata,
-                )
-                return
+            with registry.use_runtime(runtime=runtime_state):
+                session_key = session_key or self._session_key_for_source(source)
+                runtime_kwargs = _resolve_runtime_agent_kwargs()
+                if not runtime_kwargs.get("api_key"):
+                    await adapter.send(
+                        source.chat_id,
+                        f"❌ Background task {task_id} failed: no provider credentials configured.",
+                        metadata=_thread_metadata,
+                    )
+                    return
 
-            # Read model from config via shared helper
-            model = _resolve_gateway_model()
+                # Read model from the active runtime config.
+                model = _resolve_gateway_model()
 
-            # Determine toolset (same logic as _run_agent)
-            default_toolset_map = {
-                Platform.LOCAL: "hermes-cli",
-                Platform.TELEGRAM: "hermes-telegram",
-                Platform.DISCORD: "hermes-discord",
-                Platform.WHATSAPP: "hermes-whatsapp",
-                Platform.SLACK: "hermes-slack",
-                Platform.SIGNAL: "hermes-signal",
-                Platform.HOMEASSISTANT: "hermes-homeassistant",
-                Platform.EMAIL: "hermes-email",
-                Platform.DINGTALK: "hermes-dingtalk",
-            }
-            platform_toolsets_config = {}
-            try:
-                config_path = _hermes_home / 'config.yaml'
-                if config_path.exists():
-                    import yaml
-                    with open(config_path, 'r', encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                    platform_toolsets_config = user_config.get("platform_toolsets", {})
-            except Exception:
-                pass
+                # Determine toolset (same logic as _run_agent) from the active runtime config.
+                default_toolset_map = {
+                    Platform.LOCAL: "hermes-cli",
+                    Platform.TELEGRAM: "hermes-telegram",
+                    Platform.DISCORD: "hermes-discord",
+                    Platform.WHATSAPP: "hermes-whatsapp",
+                    Platform.SLACK: "hermes-slack",
+                    Platform.SIGNAL: "hermes-signal",
+                    Platform.HOMEASSISTANT: "hermes-homeassistant",
+                    Platform.EMAIL: "hermes-email",
+                    Platform.DINGTALK: "hermes-dingtalk",
+                }
+                runtime_config = _load_runtime_config()
+                platform_toolsets_config = runtime_config.get("platform_toolsets", {}) or {}
+                if not isinstance(platform_toolsets_config, dict):
+                    platform_toolsets_config = {}
 
-            platform_config_key = {
-                Platform.LOCAL: "cli",
-                Platform.TELEGRAM: "telegram",
-                Platform.DISCORD: "discord",
-                Platform.WHATSAPP: "whatsapp",
-                Platform.SLACK: "slack",
-                Platform.SIGNAL: "signal",
-                Platform.HOMEASSISTANT: "homeassistant",
-                Platform.EMAIL: "email",
-                Platform.DINGTALK: "dingtalk",
-            }.get(source.platform, "telegram")
+                platform_config_key = {
+                    Platform.LOCAL: "cli",
+                    Platform.TELEGRAM: "telegram",
+                    Platform.DISCORD: "discord",
+                    Platform.WHATSAPP: "whatsapp",
+                    Platform.SLACK: "slack",
+                    Platform.SIGNAL: "signal",
+                    Platform.HOMEASSISTANT: "homeassistant",
+                    Platform.EMAIL: "email",
+                    Platform.DINGTALK: "dingtalk",
+                }.get(source.platform, "telegram")
 
-            config_toolsets = platform_toolsets_config.get(platform_config_key)
-            if config_toolsets and isinstance(config_toolsets, list):
-                enabled_toolsets = config_toolsets
-            else:
-                default_toolset = default_toolset_map.get(source.platform, "hermes-telegram")
-                enabled_toolsets = [default_toolset]
+                config_toolsets = platform_toolsets_config.get(platform_config_key)
+                if config_toolsets and isinstance(config_toolsets, list):
+                    enabled_toolsets = config_toolsets
+                else:
+                    default_toolset = default_toolset_map.get(source.platform, "hermes-telegram")
+                    enabled_toolsets = [default_toolset]
 
-            platform_key = "cli" if source.platform == Platform.LOCAL else source.platform.value
+                platform_key = "cli" if source.platform == Platform.LOCAL else source.platform.value
 
-            pr = self._provider_routing
-            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
-            reasoning_config = self._load_reasoning_config()
-            self._reasoning_config = reasoning_config
-            turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+                pr = self._provider_routing
+                max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+                reasoning_config = self._load_reasoning_config()
+                self._reasoning_config = reasoning_config
+                turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
-            def run_sync():
-                agent = AIAgent(
-                    model=turn_route["model"],
-                    **turn_route["runtime"],
-                    max_iterations=max_iterations,
-                    quiet_mode=True,
-                    verbose_logging=False,
-                    enabled_toolsets=enabled_toolsets,
-                    reasoning_config=reasoning_config,
-                    providers_allowed=pr.get("only"),
-                    providers_ignored=pr.get("ignore"),
-                    providers_order=pr.get("order"),
-                    provider_sort=pr.get("sort"),
-                    provider_require_parameters=pr.get("require_parameters", False),
-                    provider_data_collection=pr.get("data_collection"),
-                    session_id=task_id,
-                    platform=platform_key,
-                    session_db=self._session_db,
-                    fallback_model=self._fallback_model,
-                )
+                def run_sync():
+                    with registry.use_runtime(runtime=runtime_state):
+                        from tools.terminal_tool import register_task_env_overrides
 
-                return agent.run_conversation(
-                    user_message=prompt,
-                    task_id=task_id,
-                )
+                        os.environ["HERMES_SESSION_KEY"] = session_key or ""
+                        session_context = build_session_context(
+                            source,
+                            getattr(self, "config", None) or load_gateway_config(),
+                        )
+                        self._set_session_env(session_context)
 
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, run_sync)
+                        workspace = runtime_state.context.workspace
+                        if workspace:
+                            register_task_env_overrides(task_id, {"cwd": workspace})
+
+                        try:
+                            agent = AIAgent(
+                                model=turn_route["model"],
+                                **turn_route["runtime"],
+                                max_iterations=max_iterations,
+                                quiet_mode=True,
+                                verbose_logging=False,
+                                enabled_toolsets=enabled_toolsets,
+                                reasoning_config=reasoning_config,
+                                providers_allowed=pr.get("only"),
+                                providers_ignored=pr.get("ignore"),
+                                providers_order=pr.get("order"),
+                                provider_sort=pr.get("sort"),
+                                provider_require_parameters=pr.get("require_parameters", False),
+                                provider_data_collection=pr.get("data_collection"),
+                                session_id=task_id,
+                                platform=platform_key,
+                                session_db=runtime_state.session_db,
+                                fallback_model=self._fallback_model,
+                            )
+
+                            return agent.run_conversation(
+                                user_message=prompt,
+                                task_id=task_id,
+                            )
+                        finally:
+                            self._clear_session_env()
+                            os.environ.pop("HERMES_SESSION_KEY", None)
+
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, run_sync)
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
