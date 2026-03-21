@@ -131,7 +131,7 @@ TOOLSETS = {
     },
     
     "messaging": {
-        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
+        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, Blooio, SMS, etc.",
         "tools": ["send_message"],
         "includes": []
     },
@@ -286,6 +286,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-blooio": {
+        "description": "Blooio bot toolset - iMessage/SMS messaging platform (full access)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
     "hermes-homeassistant": {
         "description": "Home Assistant bot toolset - smart home event monitoring and control",
         "tools": _HERMES_CORE_TOOLS,
@@ -307,7 +313,7 @@ TOOLSETS = {
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant", "hermes-email", "hermes-sms"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-blooio", "hermes-homeassistant", "hermes-email", "hermes-sms"]
     }
 }
 

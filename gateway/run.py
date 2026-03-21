@@ -858,6 +858,7 @@ class GatewayRunner:
         _any_allowlist = any(
             os.getenv(v)
             for v in ("TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
+                       "BLOOIO_ALLOWED_USERS",
                        "WHATSAPP_ALLOWED_USERS", "SLACK_ALLOWED_USERS",
                        "SMS_ALLOWED_USERS",
                        "GATEWAY_ALLOWED_USERS")
@@ -1113,6 +1114,13 @@ class GatewayRunner:
                 logger.warning("Telegram: python-telegram-bot not installed")
                 return None
             return TelegramAdapter(config)
+
+        elif platform == Platform.BLOOIO:
+            from gateway.platforms.blooio import BlooioAdapter, check_blooio_requirements
+            if not check_blooio_requirements():
+                logger.warning("Blooio: aiohttp not installed or BLOOIO_API_KEY/BLOOIO_PUBLIC_BASE_URL not set")
+                return None
+            return BlooioAdapter(config)
         
         elif platform == Platform.DISCORD:
             from gateway.platforms.discord import DiscordAdapter, check_discord_requirements
@@ -1227,6 +1235,7 @@ class GatewayRunner:
 
         platform_env_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOWED_USERS",
+            Platform.BLOOIO: "BLOOIO_ALLOWED_USERS",
             Platform.DISCORD: "DISCORD_ALLOWED_USERS",
             Platform.WHATSAPP: "WHATSAPP_ALLOWED_USERS",
             Platform.SLACK: "SLACK_ALLOWED_USERS",
@@ -1239,6 +1248,7 @@ class GatewayRunner:
         }
         platform_allow_all_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOW_ALL_USERS",
+            Platform.BLOOIO: "BLOOIO_ALLOW_ALL_USERS",
             Platform.DISCORD: "DISCORD_ALLOW_ALL_USERS",
             Platform.WHATSAPP: "WHATSAPP_ALLOW_ALL_USERS",
             Platform.SLACK: "SLACK_ALLOW_ALL_USERS",
@@ -3247,6 +3257,7 @@ class GatewayRunner:
             default_toolset_map = {
                 Platform.LOCAL: "hermes-cli",
                 Platform.TELEGRAM: "hermes-telegram",
+                Platform.BLOOIO: "hermes-blooio",
                 Platform.DISCORD: "hermes-discord",
                 Platform.WHATSAPP: "hermes-whatsapp",
                 Platform.SLACK: "hermes-slack",
@@ -3269,6 +3280,7 @@ class GatewayRunner:
             platform_config_key = {
                 Platform.LOCAL: "cli",
                 Platform.TELEGRAM: "telegram",
+                Platform.BLOOIO: "blooio",
                 Platform.DISCORD: "discord",
                 Platform.WHATSAPP: "whatsapp",
                 Platform.SLACK: "slack",
@@ -4354,6 +4366,7 @@ class GatewayRunner:
         default_toolset_map = {
             Platform.LOCAL: "hermes-cli",
             Platform.TELEGRAM: "hermes-telegram",
+            Platform.BLOOIO: "hermes-blooio",
             Platform.DISCORD: "hermes-discord",
             Platform.WHATSAPP: "hermes-whatsapp",
             Platform.SLACK: "hermes-slack",
@@ -4379,6 +4392,7 @@ class GatewayRunner:
         platform_config_key = {
             Platform.LOCAL: "cli",
             Platform.TELEGRAM: "telegram",
+            Platform.BLOOIO: "blooio",
             Platform.DISCORD: "discord",
             Platform.WHATSAPP: "whatsapp",
             Platform.SLACK: "slack",
