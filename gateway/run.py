@@ -198,11 +198,21 @@ os.environ["HERMES_EXEC_ASK"] = "1"
 
 # Set terminal working directory for messaging platforms.
 # If the user set an explicit path in config.yaml (not "." or "auto"),
-# respect it. Otherwise use MESSAGING_CWD or default to home directory.
+# respect it. Otherwise:
+#   - local backend: use MESSAGING_CWD or the host home directory
+#   - remote/container backends: only use an explicit MESSAGING_CWD
+#     override; otherwise leave TERMINAL_CWD unset so terminal_tool.py can
+#     choose the backend-native default inside the sandbox/remote system.
 _configured_cwd = os.environ.get("TERMINAL_CWD", "")
 if not _configured_cwd or _configured_cwd in (".", "auto", "cwd"):
-    messaging_cwd = os.getenv("MESSAGING_CWD") or str(Path.home())
-    os.environ["TERMINAL_CWD"] = messaging_cwd
+    _backend = (os.environ.get("TERMINAL_ENV", "local") or "local").strip().lower()
+    _messaging_cwd = (os.getenv("MESSAGING_CWD") or "").strip()
+    if _backend == "local":
+        os.environ["TERMINAL_CWD"] = _messaging_cwd or str(Path.home())
+    elif _messaging_cwd:
+        os.environ["TERMINAL_CWD"] = _messaging_cwd
+    else:
+        os.environ.pop("TERMINAL_CWD", None)
 
 from gateway.config import (
     Platform,
