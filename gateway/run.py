@@ -1601,6 +1601,8 @@ class GatewayRunner:
         
         # Set environment variables for tools
         self._set_session_env(context)
+        if getattr(event, "message_id", None):
+            os.environ["HERMES_SESSION_MESSAGE_ID"] = str(event.message_id)
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -4031,7 +4033,7 @@ class GatewayRunner:
     
     def _clear_session_env(self) -> None:
         """Clear session environment variables."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID"]:
+        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_SESSION_MESSAGE_ID"]:
             if var in os.environ:
                 del os.environ[var]
     
