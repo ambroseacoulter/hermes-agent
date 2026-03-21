@@ -204,7 +204,10 @@ PLATFORM_HINTS = {
         "include MEDIA:/absolute/path/to/file in your response. Blooio uses "
         "chat-based iMessage and SMS delivery, so keep responses concise when "
         "appropriate. You can also include image URLs in markdown format "
-        "![alt](url) and they will be sent as attachments when supported."
+        "![alt](url) and they will be sent as attachments when supported. "
+        "When a lightweight acknowledgement or tapback would improve the interaction, "
+        "you may use the react_to_message tool to react to the user's message, but use "
+        "reactions sparingly and only when they add clear conversational value."
     ),
     "email": (
         "You are communicating via email. Write clear, well-structured responses "
