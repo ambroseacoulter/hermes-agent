@@ -198,11 +198,21 @@ os.environ["HERMES_EXEC_ASK"] = "1"
 
 # Set terminal working directory for messaging platforms.
 # If the user set an explicit path in config.yaml (not "." or "auto"),
-# respect it. Otherwise use MESSAGING_CWD or default to home directory.
+# respect it. Otherwise:
+#   - local backend: use MESSAGING_CWD or the host home directory
+#   - remote/container backends: only use an explicit MESSAGING_CWD
+#     override; otherwise leave TERMINAL_CWD unset so terminal_tool.py can
+#     choose the backend-native default inside the sandbox/remote system.
 _configured_cwd = os.environ.get("TERMINAL_CWD", "")
 if not _configured_cwd or _configured_cwd in (".", "auto", "cwd"):
-    messaging_cwd = os.getenv("MESSAGING_CWD") or str(Path.home())
-    os.environ["TERMINAL_CWD"] = messaging_cwd
+    _backend = (os.environ.get("TERMINAL_ENV", "local") or "local").strip().lower()
+    _messaging_cwd = (os.getenv("MESSAGING_CWD") or "").strip()
+    if _backend == "local":
+        os.environ["TERMINAL_CWD"] = _messaging_cwd or str(Path.home())
+    elif _messaging_cwd:
+        os.environ["TERMINAL_CWD"] = _messaging_cwd
+    else:
+        os.environ.pop("TERMINAL_CWD", None)
 
 from gateway.config import (
     Platform,
@@ -1199,6 +1209,15 @@ class GatewayRunner:
                 return None
             return APIServerAdapter(config)
 
+        elif platform == Platform.WEBHOOK:
+            from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
+            if not check_webhook_requirements():
+                logger.warning("Webhook: aiohttp not installed")
+                return None
+            adapter = WebhookAdapter(config)
+            adapter.gateway_runner = self  # For cross-platform delivery
+            return adapter
+
         return None
     
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -1215,7 +1234,9 @@ class GatewayRunner:
         # Home Assistant events are system-generated (state changes), not
         # user-initiated messages.  The HASS_TOKEN already authenticates the
         # connection, so HA events are always authorized.
-        if source.platform == Platform.HOMEASSISTANT:
+        # Webhook events are authenticated via HMAC signature validation in
+        # the adapter itself — no user allowlist applies.
+        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK):
             return True
 
         user_id = source.user_id
@@ -1342,6 +1363,48 @@ class GatewayRunner:
         if _quick_key in self._running_agents:
             if event.get_command() == "status":
                 return await self._handle_status_command(event)
+
+            # /reset and /new must bypass the running-agent guard so they
+            # actually dispatch as commands instead of being queued as user
+            # text (which would be fed back to the agent with the same
+            # broken history — #2170).  Interrupt the agent first, then
+            # clear the adapter's pending queue so the stale "/reset" text
+            # doesn't get re-processed as a user message after the
+            # interrupt completes.
+            from hermes_cli.commands import resolve_command as _resolve_cmd_inner
+            _evt_cmd = event.get_command()
+            _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
+            if _cmd_def_inner and _cmd_def_inner.name == "new":
+                running_agent = self._running_agents.get(_quick_key)
+                if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+                    running_agent.interrupt("Session reset requested")
+                # Clear any pending messages so the old text doesn't replay
+                adapter = self.adapters.get(source.platform)
+                if adapter and hasattr(adapter, 'get_pending_message'):
+                    adapter.get_pending_message(_quick_key)  # consume and discard
+                self._pending_messages.pop(_quick_key, None)
+                # Clean up the running agent entry so the reset handler
+                # doesn't think an agent is still active.
+                if _quick_key in self._running_agents:
+                    del self._running_agents[_quick_key]
+                return await self._handle_reset_command(event)
+
+            # /queue <prompt> — queue without interrupting
+            if event.get_command() in ("queue", "q"):
+                queued_text = event.get_command_args().strip()
+                if not queued_text:
+                    return "Usage: /queue <prompt>"
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    from gateway.platforms.base import MessageEvent as _ME, MessageType as _MT
+                    queued_event = _ME(
+                        text=queued_text,
+                        message_type=_MT.TEXT,
+                        source=event.source,
+                        message_id=event.message_id,
+                    )
+                    adapter._pending_messages[_quick_key] = queued_event
+                return "Queued for the next turn."
 
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key[:20])
@@ -4544,6 +4607,26 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("agent:step hook error: %s", _e)
 
+        # Bridge sync status_callback → async adapter.send for context pressure
+        _status_adapter = self.adapters.get(source.platform)
+        _status_chat_id = source.chat_id
+        _status_thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+
+        def _status_callback_sync(event_type: str, message: str) -> None:
+            if not _status_adapter:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _status_adapter.send(
+                        _status_chat_id,
+                        message,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                )
+            except Exception as _e:
+                logger.debug("status_callback error (%s): %s", event_type, _e)
+
         def run_sync():
             # Pass session_key to process registry via env var so background
             # processes can be mapped back to this gateway session
@@ -4636,6 +4719,7 @@ class GatewayRunner:
                 tool_progress_callback=progress_callback if tool_progress_enabled else None,
                 step_callback=_step_callback_sync if _hooks_ref.loaded_hooks else None,
                 stream_delta_callback=_stream_delta_cb,
+                status_callback=_status_callback_sync,
                 platform=platform_key,
                 honcho_session_key=session_key,
                 honcho_manager=honcho_manager,

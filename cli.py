@@ -760,7 +760,7 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
 # - Dim: #B8860B (muted text)
 
 # ANSI building blocks for conversation display
-_GOLD = "\033[1;33m"    # Bold yellow — closest universal match to the gold theme
+_GOLD = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold — matches Rich Panel gold
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RST = "\033[0m"
@@ -1504,7 +1504,7 @@ class HermesCLI:
             _cprint(f"{_DIM}└{'─' * (w - 2)}┘{_RST}")
             self._reasoning_box_opened = False
 
-    def _stream_delta(self, text: str) -> None:
+    def _stream_delta(self, text) -> None:
         """Line-buffered streaming callback for real-time token rendering.
 
         Receives text deltas from the agent as tokens arrive. Buffers
@@ -1514,7 +1514,15 @@ class HermesCLI:
         Reasoning/thinking blocks (<REASONING_SCRATCHPAD>, <think>, etc.)
         are suppressed during streaming since they'd display raw XML tags.
         The agent strips them from the final response anyway.
+
+        A ``None`` value signals an intermediate turn boundary (tools are
+        about to execute).  Flushes any open boxes and resets state so
+        tool feed lines render cleanly between turns.
         """
+        if text is None:
+            self._flush_stream()
+            self._reset_stream_state()
+            return
         if not text:
             return
 
@@ -1524,9 +1532,11 @@ class HermesCLI:
         # Track whether we're inside a reasoning/thinking block.
         # These tags are model-generated (system prompt tells the model
         # to use them) and get stripped from final_response. We must
-        # suppress them during streaming too.
-        _OPEN_TAGS = ("<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>")
-        _CLOSE_TAGS = ("</REASONING_SCRATCHPAD>", "</think>", "</reasoning>", "</THINKING>")
+        # suppress them during streaming too — unless show_reasoning is
+        # enabled, in which case we route the inner content to the
+        # reasoning display box instead of discarding it.
+        _OPEN_TAGS = ("<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>")
+        _CLOSE_TAGS = ("</REASONING_SCRATCHPAD>", "</think>", "</reasoning>", "</THINKING>", "</thinking>")
 
         # Append to a pre-filter buffer first
         self._stream_prefilt = getattr(self, "_stream_prefilt", "") + text
@@ -1566,6 +1576,12 @@ class HermesCLI:
                 idx = self._stream_prefilt.find(tag)
                 if idx != -1:
                     self._in_reasoning_block = False
+                    # When show_reasoning is on, route inner content to
+                    # the reasoning display box instead of discarding.
+                    if self.show_reasoning:
+                        inner = self._stream_prefilt[:idx]
+                        if inner:
+                            self._stream_reasoning_delta(inner)
                     after = self._stream_prefilt[idx + len(tag):]
                     self._stream_prefilt = ""
                     # Process remaining text after close tag through full
@@ -1573,10 +1589,15 @@ class HermesCLI:
                     if after:
                         self._stream_delta(after)
                     return
-            # Still inside reasoning block — keep only the tail that could
-            # be a partial close tag prefix (save memory on long blocks).
+            # When show_reasoning is on, stream reasoning content live
+            # instead of silently accumulating. Keep only the tail that
+            # could be a partial close tag prefix.
             max_tag_len = max(len(t) for t in _CLOSE_TAGS)
             if len(self._stream_prefilt) > max_tag_len:
+                if self.show_reasoning:
+                    # Route the safe prefix to reasoning display
+                    safe_reasoning = self._stream_prefilt[:-max_tag_len]
+                    self._stream_reasoning_delta(safe_reasoning)
                 self._stream_prefilt = self._stream_prefilt[-max_tag_len:]
             return
 
@@ -1599,8 +1620,19 @@ class HermesCLI:
                 from hermes_cli.skin_engine import get_active_skin
                 _skin = get_active_skin()
                 label = _skin.get_branding("response_label", "⚕ Hermes")
+                _text_hex = _skin.get_color("banner_text", "#FFF8DC")
             except Exception:
                 label = "⚕ Hermes"
+                _text_hex = "#FFF8DC"
+            # Build a true-color ANSI escape for the response text color
+            # so streamed content matches the Rich Panel appearance.
+            try:
+                _r = int(_text_hex[1:3], 16)
+                _g = int(_text_hex[3:5], 16)
+                _b = int(_text_hex[5:7], 16)
+                self._stream_text_ansi = f"\033[38;2;{_r};{_g};{_b}m"
+            except (ValueError, IndexError):
+                self._stream_text_ansi = ""
             w = shutil.get_terminal_size().columns
             fill = w - 2 - len(label)
             _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
@@ -1608,9 +1640,10 @@ class HermesCLI:
         self._stream_buf += text
 
         # Emit complete lines, keep partial remainder in buffer
+        _tc = getattr(self, "_stream_text_ansi", "")
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
-            _cprint(line)
+            _cprint(f"{_tc}{line}{_RST}" if _tc else line)
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
@@ -1618,7 +1651,8 @@ class HermesCLI:
         self._close_reasoning_box()
 
         if self._stream_buf:
-            _cprint(self._stream_buf)
+            _tc = getattr(self, "_stream_text_ansi", "")
+            _cprint(f"{_tc}{self._stream_buf}{_RST}" if _tc else self._stream_buf)
             self._stream_buf = ""
 
         # Close the response box
@@ -1631,6 +1665,7 @@ class HermesCLI:
         self._stream_buf = ""
         self._stream_started = False
         self._stream_box_opened = False
+        self._stream_text_ansi = ""
         self._stream_prefilt = ""
         self._in_reasoning_block = False
         self._reasoning_box_opened = False
@@ -3505,8 +3540,17 @@ class HermesCLI:
                 # Parse provider:model syntax (e.g. "openrouter:anthropic/claude-sonnet-4.5")
                 current_provider = self.provider or self.requested_provider or "openrouter"
                 target_provider, new_model = parse_model_input(raw_input, current_provider)
-                # Auto-detect provider when no explicit provider:model syntax was used
-                if target_provider == current_provider:
+                # Auto-detect provider when no explicit provider:model syntax was used.
+                # Skip auto-detection for custom providers — the model name might
+                # coincidentally match a known provider's catalog, but the user
+                # intends to use it on their custom endpoint.  Require explicit
+                # provider:model syntax (e.g. /model openai-codex:gpt-5.2-codex)
+                # to switch away from a custom endpoint.
+                _base = self.base_url or ""
+                is_custom = current_provider == "custom" or (
+                    "localhost" in _base or "127.0.0.1" in _base
+                )
+                if target_provider == current_provider and not is_custom:
                     from hermes_cli.models import detect_provider_for_model
                     detected = detect_provider_for_model(new_model, current_provider)
                     if detected:
@@ -3574,6 +3618,13 @@ class HermesCLI:
                         if message:
                             print(f"  Reason: {message}")
                         print("  Note: Model will revert on restart. Use a verified model to save to config.")
+
+                    # Helpful hint when staying on a custom endpoint
+                    if is_custom and not provider_changed:
+                        endpoint = self.base_url or "custom endpoint"
+                        print(f"  Endpoint: {endpoint}")
+                        print(f"  Tip: To switch providers, use /model provider:model")
+                        print(f"       e.g. /model openai-codex:gpt-5.2-codex")
             else:
                 self._show_model_and_providers()
         elif canonical == "provider":
@@ -3650,6 +3701,18 @@ class HermesCLI:
             self._handle_stop_command()
         elif canonical == "background":
             self._handle_background_command(cmd_original)
+        elif canonical == "queue":
+            if not self._agent_running:
+                _cprint("  /queue only works while Hermes is busy. Just type your message normally.")
+            else:
+                # Extract prompt after "/queue " or "/q "
+                parts = cmd_original.split(None, 1)
+                payload = parts[1].strip() if len(parts) > 1 else ""
+                if not payload:
+                    _cprint("  Usage: /queue <prompt>")
+                else:
+                    self._pending_input.put(payload)
+                    _cprint(f"  Queued for the next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
@@ -4525,15 +4588,27 @@ class HermesCLI:
     # ====================================================================
 
     def _on_tool_progress(self, function_name: str, preview: str, function_args: dict):
-        """Called when a tool starts executing. Plays audio cue in voice mode."""
+        """Called when a tool starts executing.
+
+        Updates the TUI spinner widget so the user can see what the agent
+        is doing during tool execution (fills the gap between thinking
+        spinner and next response).  Also plays audio cue in voice mode.
+        """
+        if not function_name.startswith("_"):
+            from agent.display import get_tool_emoji
+            emoji = get_tool_emoji(function_name)
+            label = preview or function_name
+            if len(label) > 50:
+                label = label[:47] + "..."
+            self._spinner_text = f"{emoji} {label}"
+            self._invalidate()
+
         if not self._voice_mode:
             return
-        # Skip internal/thinking tools
         if function_name.startswith("_"):
             return
         try:
             from tools.voice_mode import play_beep
-            # Short, subtle tick sound (higher pitch, very brief)
             threading.Thread(
                 target=play_beep,
                 kwargs={"frequency": 1200, "duration": 0.06, "count": 1},
