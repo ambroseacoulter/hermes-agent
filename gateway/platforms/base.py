@@ -298,6 +298,9 @@ class MessageEvent:
     
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # Ephemeral gateway/runtime metadata (not user-authored message content)
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""

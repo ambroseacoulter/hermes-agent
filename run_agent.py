@@ -354,6 +354,26 @@ def _inject_honcho_turn_context(content, turn_context: str):
     return f"{text}\n\n{note}"
 
 
+def _inject_live_turn_context(content, label: str, turn_context: str):
+    """Append transient gateway/runtime context to the current-turn user message."""
+    if not turn_context:
+        return content
+
+    note = (
+        f"[System note: The following {label} was added during this turn. "
+        "It is transient context for this turn only, not a new user message.]\n\n"
+        f"{turn_context}"
+    )
+
+    if isinstance(content, list):
+        return list(content) + [{"type": "text", "text": note}]
+
+    text = "" if content is None else str(content)
+    if not text.strip():
+        return note
+    return f"{text}\n\n{note}"
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -407,6 +427,8 @@ class AIAgent:
         stream_delta_callback: callable = None,
         tool_gen_callback: callable = None,
         status_callback: callable = None,
+        signal_callback: callable = None,
+        turn_signal_poll_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         prefill_messages: List[Dict[str, Any]] = None,
@@ -536,6 +558,8 @@ class AIAgent:
         self.stream_delta_callback = stream_delta_callback
         self.status_callback = status_callback
         self.tool_gen_callback = tool_gen_callback
+        self.signal_callback = signal_callback
+        self.turn_signal_poll_callback = turn_signal_poll_callback
         self._last_reported_tool = None  # Track for "new tool" mode
         
         # Tool execution state — allows _vprint during tool execution
@@ -4695,12 +4719,24 @@ class AIAgent:
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
             )
+        elif function_name == "signal_user":
+            from tools.signal_user_tool import signal_user_tool as _signal_user_tool
+            return _signal_user_tool(
+                title=function_args.get("title", ""),
+                summary=function_args.get("summary", ""),
+                reason=function_args.get("reason", "notify"),
+                priority=function_args.get("priority", "normal"),
+                action_items=function_args.get("action_items"),
+                metadata=function_args.get("metadata"),
+                callback=self.signal_callback,
+            )
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 honcho_manager=self._honcho,
                 honcho_session_key=self._honcho_session_key,
+                signal_callback=self.signal_callback,
             )
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -5054,6 +5090,20 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self.quiet_mode:
                         self._vprint(f"  {cute_msg}")
+            elif function_name == "signal_user":
+                from tools.signal_user_tool import signal_user_tool as _signal_user_tool
+                function_result = _signal_user_tool(
+                    title=function_args.get("title", ""),
+                    summary=function_args.get("summary", ""),
+                    reason=function_args.get("reason", "notify"),
+                    priority=function_args.get("priority", "normal"),
+                    action_items=function_args.get("action_items"),
+                    metadata=function_args.get("metadata"),
+                    callback=self.signal_callback,
+                )
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl('signal_user', function_args, tool_duration, result=function_result)}")
             elif self.quiet_mode:
                 face = random.choice(KawaiiSpinner.KAWAII_WAITING)
                 emoji = _get_tool_emoji(function_name)
@@ -5069,6 +5119,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        signal_callback=self.signal_callback,
                     )
                     _spinner_result = function_result
                 except Exception as tool_error:
@@ -5085,6 +5136,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        signal_callback=self.signal_callback,
                     )
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
@@ -5434,6 +5486,7 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._last_content_with_tools = None
         self._mute_post_response = False
+        self._turn_signal_context = ""
         # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
@@ -5613,6 +5666,15 @@ class AIAgent:
                 if not self.quiet_mode:
                     self._safe_print(f"\n⚡ Breaking out of tool loop due to interrupt...")
                 break
+
+            self._turn_signal_context = ""
+            if self.turn_signal_poll_callback:
+                try:
+                    polled_signal_context = self.turn_signal_poll_callback()
+                    if polled_signal_context:
+                        self._turn_signal_context = str(polled_signal_context)
+                except Exception as signal_err:
+                    logger.debug("turn_signal_poll_callback failed: %s", signal_err)
             
             api_call_count += 1
             if not self.iteration_budget.consume():
@@ -5654,6 +5716,12 @@ class AIAgent:
                 if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
                     api_msg["content"] = _inject_honcho_turn_context(
                         api_msg.get("content", ""), self._honcho_turn_context
+                    )
+                if idx == current_turn_user_idx and msg.get("role") == "user" and self._turn_signal_context:
+                    api_msg["content"] = _inject_live_turn_context(
+                        api_msg.get("content", ""),
+                        "live Cortex signals",
+                        self._turn_signal_context,
                     )
 
                 # For ALL assistant messages, pass reasoning back to the API

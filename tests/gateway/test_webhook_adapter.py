@@ -211,6 +211,14 @@ class TestRenderPrompt:
         assert "my-route" in result
         assert "key" in result
 
+    def test_signal_mode_prompt_instructions_added(self):
+        """Signal-mode routes prepend explicit delivery instructions."""
+        adapter = _make_adapter()
+        result = adapter._augment_signal_prompt("Handle invoice email")
+        assert "final assistant response is NOT shown to the user" in result
+        assert "signal_user" in result
+        assert result.endswith("Handle invoice email")
+
 
 # ===================================================================
 # Delivery extra rendering
@@ -227,6 +235,27 @@ class TestRenderDeliveryExtra:
         assert result["repo"] == "org/repo"
         assert result["pr_number"] == "7"
         assert result["static"] == 42  # non-string left as-is
+
+
+class TestWebhookSendModes:
+    @pytest.mark.asyncio
+    async def test_signal_mode_send_suppresses_final_delivery(self):
+        adapter = _make_adapter()
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.adapters = {Platform.TELEGRAM: AsyncMock()}
+
+        chat_id = "webhook:alerts:123"
+        adapter._delivery_info[chat_id] = {
+            "deliver": "telegram",
+            "deliver_type": "signal",
+            "deliver_extra": {"chat_id": "999"},
+        }
+
+        result = await adapter.send(chat_id, "This should stay hidden.")
+
+        assert result.success is True
+        adapter.gateway_runner.adapters[Platform.TELEGRAM].send.assert_not_called()
+        assert chat_id not in adapter._delivery_info
 
 
 # ===================================================================
@@ -303,6 +332,43 @@ class TestEventFilter:
                 headers={"X-GitHub-Event": "whatever"},
             )
             assert resp.status == 202
+
+    @pytest.mark.asyncio
+    async def test_signal_mode_sets_event_metadata_and_prompt(self):
+        routes = {
+            "inbox": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "Email subject: {subject}",
+                "deliver": "telegram",
+                "deliver_type": "signal",
+                "deliver_extra": {"chat_id": "12345"},
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        captured_events: list[MessageEvent] = []
+
+        async def _capture(event: MessageEvent):
+            captured_events.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/inbox",
+                json={"subject": "Power bill due"},
+                headers={"X-GitHub-Delivery": "sig-evt-001"},
+            )
+            assert resp.status == 202
+
+        await asyncio.sleep(0.05)
+
+        assert len(captured_events) == 1
+        event = captured_events[0]
+        assert "signal_user" in event.text
+        assert event.metadata["webhook"]["deliver_type"] == "signal"
+        assert event.metadata["webhook"]["deliver"] == "telegram"
+        assert event.metadata["webhook"]["deliver_extra"]["chat_id"] == "12345"
 
 
 # ===================================================================

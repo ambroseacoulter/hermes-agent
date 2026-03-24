@@ -145,17 +145,25 @@ class WebhookAdapter(BasePlatformAdapter):
         info stored during webhook receipt so it doesn't leak memory.
         """
         delivery = self._delivery_info.pop(chat_id, {})
-        deliver_type = delivery.get("deliver", "log")
+        route_deliver_type = str(delivery.get("deliver_type", "always") or "always").lower()
+        deliver_target = delivery.get("deliver", "log")
 
-        if deliver_type == "log":
+        if route_deliver_type == "signal":
+            logger.info(
+                "[webhook] Suppressed final response delivery for %s (signal mode)",
+                chat_id,
+            )
+            return SendResult(success=True)
+
+        if deliver_target == "log":
             logger.info("[webhook] Response for %s: %s", chat_id, content[:200])
             return SendResult(success=True)
 
-        if deliver_type == "github_comment":
+        if deliver_target == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
         # Cross-platform delivery (telegram, discord, etc.)
-        if self.gateway_runner and deliver_type in (
+        if self.gateway_runner and deliver_target in (
             "telegram",
             "discord",
             "slack",
@@ -163,12 +171,12 @@ class WebhookAdapter(BasePlatformAdapter):
             "sms",
         ):
             return await self._deliver_cross_platform(
-                deliver_type, content, delivery
+                deliver_target, content, delivery
             )
 
-        logger.warning("[webhook] Unknown deliver type: %s", deliver_type)
+        logger.warning("[webhook] Unknown deliver type: %s", deliver_target)
         return SendResult(
-            success=False, error=f"Unknown deliver type: {deliver_type}"
+            success=False, error=f"Unknown deliver type: {deliver_target}"
         )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -263,11 +271,17 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "ignored", "event": event_type}
             )
 
+        deliver_type = str(route_config.get("deliver_type", "always") or "always").lower()
+        if deliver_type not in {"always", "signal"}:
+            deliver_type = "always"
+
         # Format prompt from template
         prompt_template = route_config.get("prompt", "")
         prompt = self._render_prompt(
             prompt_template, payload, event_type, route_name
         )
+        if deliver_type == "signal":
+            prompt = self._augment_signal_prompt(prompt)
 
         # Inject skill content if configured.
         # We call build_skill_invocation_message() directly rather than
@@ -330,6 +344,7 @@ class WebhookAdapter(BasePlatformAdapter):
         # Store delivery info for send() — consumed (popped) on delivery
         deliver_config = {
             "deliver": route_config.get("deliver", "log"),
+            "deliver_type": deliver_type,
             "deliver_extra": self._render_delivery_extra(
                 route_config.get("deliver_extra", {}), payload
             ),
@@ -351,6 +366,16 @@ class WebhookAdapter(BasePlatformAdapter):
             source=source,
             raw_message=payload,
             message_id=delivery_id,
+            metadata={
+                "webhook": {
+                    "route_name": route_name,
+                    "delivery_id": delivery_id,
+                    "event_type": event_type,
+                    "deliver": deliver_config["deliver"],
+                    "deliver_type": deliver_type,
+                    "deliver_extra": deliver_config["deliver_extra"],
+                }
+            },
         )
 
         logger.info(
@@ -458,6 +483,18 @@ class WebhookAdapter(BasePlatformAdapter):
             else:
                 rendered[key] = value
         return rendered
+
+    def _augment_signal_prompt(self, prompt: str) -> str:
+        """Wrap a webhook prompt with signal-mode delivery instructions."""
+        instructions = (
+            "[Webhook signal mode instructions:\n"
+            "- Your final assistant response is NOT shown to the user.\n"
+            "- Use the signal_user tool only if the user must be notified, must approve something, or must provide input.\n"
+            "- Include any durable identifiers Hermes will need later in metadata (for example email_id, thread_id, invoice_id, draft_id).\n"
+            "- If no user-facing follow-up is required, do not call signal_user and finish silently.\n"
+            "- If you already completed work (for example drafting a reply), summarize that inside signal_user so Hermes can explain it naturally.]\n\n"
+        )
+        return instructions + (prompt or "")
 
     # ------------------------------------------------------------------
     # Response delivery

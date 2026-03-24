@@ -221,6 +221,7 @@ from gateway.session import (
     build_session_key,
 )
 from gateway.delivery import DeliveryRouter, DeliveryTarget
+from gateway.cortex import SessionSignalManager, SignalRecord
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
 
 logger = logging.getLogger(__name__)
@@ -336,6 +337,7 @@ class GatewayRunner:
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
         self.delivery_router = DeliveryRouter(self.config)
+        self.cortex = SessionSignalManager()
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._exit_cleanly = False
@@ -401,6 +403,7 @@ class GatewayRunner:
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        self._signal_wake_tasks: Dict[str, asyncio.Task] = {}
 
     def _get_or_create_gateway_honcho(self, session_key: str):
         """Return a persistent Honcho manager/config pair for this gateway session."""
@@ -667,6 +670,175 @@ class GatewayRunner:
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
         )
+
+    def _find_existing_source_for_target(
+        self,
+        platform: Platform,
+        chat_id: str,
+        thread_id: Optional[str] = None,
+    ) -> Optional[SessionSource]:
+        """Reuse an existing session origin when resolving a Cortex target."""
+        self.session_store._ensure_loaded()
+        matches = []
+        for entry in self.session_store._entries.values():
+            origin = entry.origin
+            if not origin:
+                continue
+            if origin.platform != platform or origin.chat_id != chat_id:
+                continue
+            if thread_id and origin.thread_id != thread_id:
+                continue
+            matches.append(entry)
+        if not matches:
+            return None
+        matches.sort(key=lambda entry: entry.updated_at, reverse=True)
+        return matches[0].origin
+
+    def _resolve_cortex_target_source(
+        self,
+        deliver: str,
+        deliver_extra: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Optional[SessionSource], Optional[str]]:
+        """Resolve webhook deliver config into the target session source/key."""
+        deliver_extra = dict(deliver_extra or {})
+        target = DeliveryTarget.parse(deliver)
+        if target.platform in {Platform.LOCAL, Platform.WEBHOOK}:
+            return None, "Signals require a messaging platform target, not local/webhook delivery."
+
+        chat_id = deliver_extra.get("chat_id") or target.chat_id
+        if not chat_id:
+            home = self.config.get_home_channel(target.platform)
+            if not home:
+                return None, f"No chat_id or home channel configured for {target.platform.value}."
+            chat_id = home.chat_id
+            chat_name = home.name
+        else:
+            chat_name = None
+
+        thread_id = deliver_extra.get("thread_id") or target.thread_id
+        existing = self._find_existing_source_for_target(target.platform, str(chat_id), thread_id)
+        if existing:
+            return existing, None
+
+        source = SessionSource(
+            platform=target.platform,
+            chat_id=str(chat_id),
+            chat_name=chat_name,
+            chat_type="dm",
+            thread_id=thread_id,
+        )
+        return source, None
+
+    @staticmethod
+    def _signal_recency_bucket(last_activity: Optional[datetime]) -> str:
+        if not last_activity:
+            return "cold"
+        age_seconds = max(0.0, (datetime.now() - last_activity).total_seconds())
+        if age_seconds <= 120:
+            return "hot"
+        if age_seconds <= 900:
+            return "warm"
+        return "cold"
+
+    def _format_signal_prompt_block(self, signals: List[SignalRecord], *, active_turn: bool, recency: str) -> str:
+        signal_lines: List[str] = []
+        for signal in signals:
+            signal_lines.append(
+                f"- {signal.title} | priority={signal.priority} | reason={signal.reason}\n"
+                f"  summary: {signal.summary}"
+            )
+            if signal.action_items:
+                signal_lines.append(f"  action_items: {json.dumps(signal.action_items, ensure_ascii=False)}")
+            if signal.metadata:
+                signal_lines.append(f"  metadata: {json.dumps(signal.metadata, ensure_ascii=False, default=str)}")
+
+        guidance = (
+            "These Cortex signals arrived during the current turn. Weave them in naturally if relevant; "
+            "if they are unrelated, finish the current answer cleanly and then mention them briefly."
+            if active_turn
+            else (
+                f"You are waking the user due to one or more external events. Session recency is {recency}. "
+                "Phrase the message naturally for that recency. Do not mention internal signal or webhook machinery unless it helps."
+            )
+        )
+        return (
+            f"{guidance}\n\n"
+            "Signals:\n"
+            + "\n".join(signal_lines)
+        )
+
+    def _build_signal_persist_marker(self, signals: List[SignalRecord]) -> str:
+        if not signals:
+            return "[System event: Cortex signals received.]"
+        if len(signals) == 1:
+            title = signals[0].title.replace('"', "'")
+            return f'[System event: signal "{title}" received.]'
+        return f"[System event: {len(signals)} signals received.]"
+
+    async def _maybe_schedule_signal_wake(self, session_key: str, *, delay_seconds: float = 0.0) -> None:
+        """Wake an idle session when undelivered Cortex signals exist."""
+        if not self.cortex.has_pending(session_key):
+            return
+        if session_key in self._running_agents:
+            return
+        existing = self._signal_wake_tasks.get(session_key)
+        if existing and not existing.done():
+            return
+
+        async def _runner() -> None:
+            try:
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                await self._deliver_pending_signals(session_key)
+            finally:
+                self._signal_wake_tasks.pop(session_key, None)
+
+        self._signal_wake_tasks[session_key] = asyncio.create_task(_runner())
+
+    async def _deliver_pending_signals(self, session_key: str) -> None:
+        """Claim pending signals and deliver them as a synthetic wake turn."""
+        if session_key in self._running_agents:
+            return
+
+        signals = self.cortex.claim_pending(session_key)
+        if not signals:
+            return
+
+        self.session_store._ensure_loaded()
+        entry = self.session_store._entries.get(session_key)
+        source = entry.origin if entry and entry.origin else None
+        if source is None:
+            logger.warning("Cannot deliver Cortex signal for %s: missing session origin", session_key)
+            return
+
+        recency = self._signal_recency_bucket(entry.updated_at if entry else None)
+        event = MessageEvent(
+            text=self._format_signal_prompt_block(signals, active_turn=False, recency=recency),
+            message_type=MessageType.TEXT,
+            source=source,
+            metadata={
+                "persist_user_message": self._build_signal_persist_marker(signals),
+                "synthetic_signal_delivery": True,
+            },
+        )
+
+        synthetic_session_key = self._session_key_for_source(source)
+        if synthetic_session_key in self._running_agents:
+            return
+
+        self._running_agents[synthetic_session_key] = _AGENT_PENDING_SENTINEL
+        try:
+            response = await self._handle_message_with_agent(event, source, synthetic_session_key)
+            if response:
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    send_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    await adapter.send(source.chat_id, response, metadata=send_meta)
+        except Exception:
+            logger.exception("Failed to deliver pending Cortex signals for %s", session_key)
+        finally:
+            if self._running_agents.get(synthetic_session_key) is _AGENT_PENDING_SENTINEL:
+                del self._running_agents[synthetic_session_key]
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         from agent.smart_model_routing import resolve_turn_route
@@ -1852,6 +2024,7 @@ class GatewayRunner:
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        event_metadata = getattr(event, "metadata", None) or {}
 
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
@@ -2198,10 +2371,15 @@ class GatewayRunner:
             )
         
         # One-time prompt if no home channel is set for this platform
-        if not history and source.platform and source.platform != Platform.LOCAL:
+        if not history and source.platform and source.platform not in {Platform.LOCAL, Platform.WEBHOOK}:
             platform_name = source.platform.value
             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
-            if not os.getenv(env_key):
+            home_channel = None
+            try:
+                home_channel = self.config.get_home_channel(source.platform)
+            except Exception:
+                home_channel = None
+            if not os.getenv(env_key) and not home_channel:
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     await adapter.send(
@@ -2394,7 +2572,9 @@ class GatewayRunner:
                 history=history,
                 source=source,
                 session_id=session_entry.session_id,
-                session_key=session_key
+                session_key=session_key,
+                event_metadata=event_metadata,
+                persist_user_message=event_metadata.get("persist_user_message"),
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -2407,6 +2587,9 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
             agent_messages = agent_result.get("messages", [])
+
+            if agent_result.get("interrupted") and self.cortex.has_pending(session_key):
+                response = ""
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
@@ -2601,8 +2784,10 @@ class GatewayRunner:
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
                         )
+                await self._maybe_schedule_signal_wake(session_key)
                 return None
 
+            await self._maybe_schedule_signal_wake(session_key)
             return response
             
         except Exception as e:
@@ -3158,6 +3343,12 @@ class GatewayRunner:
         platform_name = source.platform.value if source.platform else "unknown"
         chat_id = source.chat_id
         chat_name = source.chat_name or chat_id
+
+        if source.platform in {None, Platform.LOCAL, Platform.WEBHOOK}:
+            return (
+                "This platform does not use a home channel. "
+                "Run /sethome from a real messaging chat like Telegram, Discord, Slack, Signal, Email, or SMS."
+            )
         
         env_key = f"{platform_name.upper()}_HOME_CHANNEL"
         
@@ -3174,6 +3365,14 @@ class GatewayRunner:
                 yaml.dump(user_config, f, default_flow_style=False)
             # Also set in the current environment so it takes effect immediately
             os.environ[env_key] = str(chat_id)
+            from gateway.config import HomeChannel, PlatformConfig
+            platform_cfg = self.config.platforms.setdefault(source.platform, PlatformConfig())
+            platform_cfg.enabled = True
+            platform_cfg.home_channel = HomeChannel(
+                platform=source.platform,
+                chat_id=str(chat_id),
+                name=str(chat_name),
+            )
         except Exception as e:
             return f"Failed to save home channel: {e}"
         
@@ -4847,6 +5046,8 @@ class GatewayRunner:
         session_id: str,
         session_key: str = None,
         _interrupt_depth: int = 0,
+        event_metadata: Optional[Dict[str, Any]] = None,
+        persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -4875,6 +5076,7 @@ class GatewayRunner:
             Platform.HOMEASSISTANT: "hermes-homeassistant",
             Platform.EMAIL: "hermes-email",
             Platform.DINGTALK: "hermes-dingtalk",
+            Platform.WEBHOOK: "hermes-webhook",
         }
 
         # Try to load platform_toolsets from config
@@ -4900,6 +5102,7 @@ class GatewayRunner:
             Platform.HOMEASSISTANT: "homeassistant",
             Platform.EMAIL: "email",
             Platform.DINGTALK: "dingtalk",
+            Platform.WEBHOOK: "webhook",
         }.get(source.platform, "telegram")
         
         # Use config override if present (list of toolsets), otherwise hardcoded default
@@ -4909,6 +5112,11 @@ class GatewayRunner:
         else:
             default_toolset = default_toolset_map.get(source.platform, "hermes-telegram")
             enabled_toolsets = [default_toolset]
+
+        event_metadata = event_metadata or {}
+        webhook_meta = event_metadata.get("webhook", {}) if isinstance(event_metadata.get("webhook"), dict) else {}
+        if source.platform == Platform.WEBHOOK and webhook_meta.get("deliver_type") == "signal":
+            enabled_toolsets = list(dict.fromkeys(list(enabled_toolsets) + ["cortex-signal"]))
         
         # Tool progress mode from config.yaml: "all", "new", "verbose", "off"
         # Falls back to env vars for backward compatibility
@@ -5115,6 +5323,69 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
+        target_signal_source = None
+        target_signal_session_key = None
+        signal_source_ref = None
+        if source.platform == Platform.WEBHOOK and webhook_meta.get("deliver_type") == "signal":
+            target_signal_source, signal_target_error = self._resolve_cortex_target_source(
+                webhook_meta.get("deliver", ""),
+                webhook_meta.get("deliver_extra") or {},
+            )
+            if target_signal_source:
+                target_signal_session_key = self._session_key_for_source(target_signal_source)
+                signal_source_ref = (
+                    f"{webhook_meta.get('route_name', 'webhook')}:"
+                    f"{webhook_meta.get('delivery_id', session_id)}"
+                )
+            else:
+                logger.warning("Webhook signal mode target resolution failed: %s", signal_target_error)
+
+        def _signal_callback_sync(
+            *,
+            title: str,
+            summary: str,
+            reason: str,
+            priority: str = "normal",
+            action_items=None,
+            metadata=None,
+        ) -> str:
+            if not target_signal_source or not target_signal_session_key or not signal_source_ref:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "No valid signal target is configured for this webhook route.",
+                    }
+                )
+
+            signal = self.cortex.create_signal(
+                target_session_key=target_signal_session_key,
+                source_type="webhook",
+                source_ref=signal_source_ref,
+                title=title,
+                summary=summary,
+                priority=priority or "normal",
+                reason=reason,
+                action_items=action_items or [],
+                metadata=metadata or {},
+            )
+
+            running_agent = self._running_agents.get(target_signal_session_key)
+            if not running_agent:
+                _loop_for_step.call_soon_threadsafe(
+                    lambda: asyncio.create_task(
+                        self._maybe_schedule_signal_wake(target_signal_session_key)
+                    )
+                )
+
+            return json.dumps(
+                {
+                    "success": True,
+                    "signal_id": signal.signal_id,
+                    "target": target_signal_session_key,
+                    "state": signal.state,
+                }
+            )
+
         def run_sync():
             # Pass session_key to process registry via env var so background
             # processes can be mapped back to this gateway session
@@ -5232,6 +5503,8 @@ class GatewayRunner:
                     honcho_config=honcho_config,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    signal_callback=_signal_callback_sync if webhook_meta.get("deliver_type") == "signal" else None,
+                    turn_signal_poll_callback=None,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
@@ -5245,6 +5518,8 @@ class GatewayRunner:
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
+            agent.signal_callback = _signal_callback_sync if webhook_meta.get("deliver_type") == "signal" else None
+            agent.turn_signal_poll_callback = None
             
             # Store agent reference for interrupt support
             agent_holder[0] = agent
@@ -5306,7 +5581,12 @@ class GatewayRunner:
                             if _p:
                                 _history_media_paths.add(_p)
             
-            result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+            result = agent.run_conversation(
+                message,
+                conversation_history=agent_history,
+                task_id=session_id,
+                persist_user_message=persist_user_message,
+            )
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
@@ -5571,6 +5851,7 @@ class GatewayRunner:
                     session_id=session_id,
                     session_key=session_key,
                     _interrupt_depth=_interrupt_depth + 1,
+                    event_metadata=event_metadata,
                 )
         finally:
             # Stop progress sender and interrupt monitor
@@ -5593,6 +5874,18 @@ class GatewayRunner:
             tracking_task.cancel()
             if session_key and session_key in self._running_agents:
                 del self._running_agents[session_key]
+            if session_key and self.cortex.has_pending(session_key):
+                try:
+                    await self._maybe_schedule_signal_wake(
+                        session_key,
+                        delay_seconds=0.35,
+                    )
+                except Exception as signal_err:
+                    logger.debug(
+                        "Failed to schedule post-turn signal wake for %s: %s",
+                        session_key,
+                        signal_err,
+                    )
             
             # Wait for cancelled tasks
             for task in [progress_task, interrupt_monitor, tracking_task]:

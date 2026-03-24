@@ -154,6 +154,7 @@ def _discover_tools():
         "tools.clarify_tool",
         "tools.code_execution_tool",
         "tools.delegate_tool",
+        "tools.signal_user_tool",
         "tools.process_registry",
         "tools.send_message_tool",
         "tools.honcho_tools",
@@ -361,7 +362,7 @@ def get_tool_definitions(
 # because they need agent-level state (TodoStore, MemoryStore, etc.).
 # The registry still holds their schemas; dispatch just returns a stub error
 # so if something slips through, the LLM sees a sensible message.
-_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
+_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task", "signal_user"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
 
@@ -373,6 +374,7 @@ def handle_function_call(
     enabled_tools: Optional[List[str]] = None,
     honcho_manager: Optional[Any] = None,
     honcho_session_key: Optional[str] = None,
+    signal_callback: Optional[Any] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -419,6 +421,7 @@ def handle_function_call(
                 enabled_tools=sandbox_enabled,
                 honcho_manager=honcho_manager,
                 honcho_session_key=honcho_session_key,
+                signal_callback=signal_callback,
             )
         else:
             result = registry.dispatch(
@@ -427,6 +430,7 @@ def handle_function_call(
                 user_task=user_task,
                 honcho_manager=honcho_manager,
                 honcho_session_key=honcho_session_key,
+                signal_callback=signal_callback,
             )
 
         try:

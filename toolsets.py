@@ -196,6 +196,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "cortex-signal": {
+        "description": "Emit Cortex user-facing signals from external event runs",
+        "tools": ["signal_user"],
+        "includes": []
+    },
+
     "honcho": {
         "description": "Honcho AI-native memory for persistent cross-session user modeling",
         "tools": ["honcho_context", "honcho_profile", "honcho_search", "honcho_conclude"],
@@ -293,6 +299,12 @@ TOOLSETS = {
 
     "hermes-email": {
         "description": "Email bot toolset - interact with Hermes via email (IMAP/SMTP)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    "hermes-webhook": {
+        "description": "Webhook event toolset - full automation tools without signal emission by default",
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
