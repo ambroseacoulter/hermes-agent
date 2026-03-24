@@ -4720,16 +4720,7 @@ class AIAgent:
                 parent_agent=self,
             )
         elif function_name == "signal_user":
-            from tools.signal_user_tool import signal_user_tool as _signal_user_tool
-            return _signal_user_tool(
-                title=function_args.get("title", ""),
-                summary=function_args.get("summary", ""),
-                reason=function_args.get("reason", "notify"),
-                priority=function_args.get("priority", "normal"),
-                action_items=function_args.get("action_items"),
-                metadata=function_args.get("metadata"),
-                callback=self.signal_callback,
-            )
+            return self._dispatch_signal_user(function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -4738,6 +4729,18 @@ class AIAgent:
                 honcho_session_key=self._honcho_session_key,
                 signal_callback=self.signal_callback,
             )
+
+    def _dispatch_signal_user(self, function_args: dict) -> str:
+        from tools.signal_user_tool import signal_user_tool as _signal_user_tool
+        return _signal_user_tool(
+            title=function_args.get("title", ""),
+            summary=function_args.get("summary", ""),
+            reason=function_args.get("reason", "notify"),
+            priority=function_args.get("priority", "normal"),
+            action_items=function_args.get("action_items"),
+            metadata=function_args.get("metadata"),
+            callback=self.signal_callback,
+        )
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
@@ -5091,16 +5094,7 @@ class AIAgent:
                     elif self.quiet_mode:
                         self._vprint(f"  {cute_msg}")
             elif function_name == "signal_user":
-                from tools.signal_user_tool import signal_user_tool as _signal_user_tool
-                function_result = _signal_user_tool(
-                    title=function_args.get("title", ""),
-                    summary=function_args.get("summary", ""),
-                    reason=function_args.get("reason", "notify"),
-                    priority=function_args.get("priority", "normal"),
-                    action_items=function_args.get("action_items"),
-                    metadata=function_args.get("metadata"),
-                    callback=self.signal_callback,
-                )
+                function_result = self._dispatch_signal_user(function_args)
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('signal_user', function_args, tool_duration, result=function_result)}")

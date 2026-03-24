@@ -86,14 +86,19 @@ class SessionSignalManager:
             if not queue:
                 return []
             claimed: List[SignalRecord] = []
+            consumed_ids: List[str] = []
             while queue:
                 signal_id = queue.popleft()
                 signal = self._signals.get(signal_id)
                 if not signal or signal.state != "pending":
+                    consumed_ids.append(signal_id)
                     continue
                 signal.state = "delivered"
                 signal.delivered_at = datetime.now()
                 claimed.append(signal)
+                consumed_ids.append(signal_id)
+            for sid in consumed_ids:
+                self._signals.pop(sid, None)
             if not queue:
                 self._queues.pop(session_key, None)
             return claimed

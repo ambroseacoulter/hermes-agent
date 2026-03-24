@@ -755,10 +755,12 @@ class GatewayRunner:
         guidance = (
             "These Cortex signals arrived during the current turn. Weave them in naturally if relevant; "
             "if they are unrelated, finish the current answer cleanly and then mention them briefly."
+            "Suggest an action if it is genuinly helpful to the user and relevant to context of each signal. Example, suggest setting a reminder for an upcoming bill or appointment."
             if active_turn
             else (
                 f"You are waking the user due to one or more external events. Session recency is {recency}. "
                 "Phrase the message naturally for that recency. Do not mention internal signal or webhook machinery unless it helps."
+                "Suggest an action if it is genuinly helpful to the user and relevant to context of each signal. Example, suggest setting a reminder for an upcoming bill or appointment."
             )
         )
         return (
@@ -777,7 +779,7 @@ class GatewayRunner:
 
     async def _maybe_schedule_signal_wake(self, session_key: str, *, delay_seconds: float = 0.0) -> None:
         """Wake an idle session when undelivered Cortex signals exist."""
-        if not self.cortex.has_pending(session_key):
+        if not getattr(self, "cortex", None) or not self.cortex.has_pending(session_key):
             return
         if session_key in self._running_agents:
             return
@@ -2588,7 +2590,7 @@ class GatewayRunner:
             response = agent_result.get("final_response") or ""
             agent_messages = agent_result.get("messages", [])
 
-            if agent_result.get("interrupted") and self.cortex.has_pending(session_key):
+            if agent_result.get("interrupted") and getattr(self, "cortex", None) and self.cortex.has_pending(session_key):
                 response = ""
 
             # Surface error details when the agent failed silently (final_response=None)
@@ -5874,7 +5876,7 @@ class GatewayRunner:
             tracking_task.cancel()
             if session_key and session_key in self._running_agents:
                 del self._running_agents[session_key]
-            if session_key and self.cortex.has_pending(session_key):
+            if session_key and getattr(self, "cortex", None) and self.cortex.has_pending(session_key):
                 try:
                     await self._maybe_schedule_signal_wake(
                         session_key,

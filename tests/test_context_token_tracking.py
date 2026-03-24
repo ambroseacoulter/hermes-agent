@@ -54,7 +54,7 @@ def _make_agent(monkeypatch, api_mode, provider, response_fn):
             self._cleanup_task_resources = self._persist_session = lambda *a, **k: None
             self._save_trajectory = self._save_session_log = lambda *a, **k: None
 
-        def run_conversation(self, msg, conversation_history=None, task_id=None):
+        def run_conversation(self, msg, conversation_history=None, task_id=None, **kwargs):
             self._interruptible_api_call = lambda kw: response_fn()
             return super().run_conversation(msg, conversation_history=conversation_history, task_id=task_id)
 

@@ -59,7 +59,7 @@ class FakeAgent:
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
         self.tools = []
 
-    def run_conversation(self, message, conversation_history=None, task_id=None):
+    def run_conversation(self, message, conversation_history=None, task_id=None, **kwargs):
         self.tool_progress_callback("terminal", "pwd")
         time.sleep(0.35)
         self.tool_progress_callback("browser_navigate", "https://example.com")
