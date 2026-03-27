@@ -451,7 +451,7 @@ agent:
 #   - A preset like "hermes-cli" or "hermes-telegram" (curated tool set)
 #   - A list of individual toolsets to compose your own (see list below)
 #
-# Supported platform keys: cli, telegram, discord, whatsapp, slack
+# Supported platform keys: cli, telegram, discord, whatsapp, slack, signal, homeassistant, sendblue
 #
 # Examples:
 #
@@ -480,6 +480,7 @@ agent:
 #   slack:         hermes-slack          (same as telegram)
 #   signal:        hermes-signal         (same as telegram)
 #   homeassistant: hermes-homeassistant  (same as telegram)
+#   sendblue:      hermes-sendblue       (same as telegram + Sendblue reaction/read tools)
 #
 platform_toolsets:
   cli: [hermes-cli]
@@ -489,6 +490,7 @@ platform_toolsets:
   slack: [hermes-slack]
   signal: [hermes-signal]
   homeassistant: [hermes-homeassistant]
+  sendblue: [hermes-sendblue]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Available toolsets (use these names in platform_toolsets or the toolsets list)
@@ -522,6 +524,7 @@ platform_toolsets:
 #   hermes-discord   - Same as hermes-telegram
 #   hermes-whatsapp  - Same as hermes-telegram
 #   hermes-slack     - Same as hermes-telegram
+#   hermes-sendblue  - Same as hermes-telegram + Sendblue-specific messaging actions
 #
 # COMPOSITE:
 #   debugging    - terminal + web + file
@@ -553,6 +556,38 @@ platform_toolsets:
 # Use `hermes tools` to configure interactively, or edit platform_toolsets directly.
 #
 # CLI override: hermes chat --toolsets terminal,web,file
+
+# =============================================================================
+# Messaging Platform Configuration
+# =============================================================================
+# Configure messaging adapters directly in config.yaml. Environment variables in
+# ~/.hermes/.env still take precedence when both are set.
+#
+# Sendblue example:
+# platforms:
+#   sendblue:
+#     enabled: true
+#     api_key: your_sendblue_api_key
+#     extra:
+#       api_secret: your_sendblue_api_secret
+#       from_number: "+15551234567"
+#       allowed_users: "+15559876543,+15551112222"
+#       webhook_host: 0.0.0.0
+#       webhook_port: 8645
+#       webhook_path: /webhooks/sendblue
+#       webhook_secret: your_shared_secret          # optional; leave blank or omit to disable secret validation
+#       webhook_secret_header: sb-signing-secret    # default Sendblue header; press Enter in `hermes gateway setup` to accept
+#       auto_mark_read: true
+#       status_callback_url: ""
+#     home_channel:
+#       platform: sendblue
+#       chat_id: "+15559876543"
+#       name: Home
+#
+# Free-plan note: in Sendblue Conversations, add yourself as a contact first,
+# then send an iMessage from your phone to your Sendblue number to verify
+# ownership before testing Hermes.
+#
 
 # =============================================================================
 # MCP (Model Context Protocol) Servers
