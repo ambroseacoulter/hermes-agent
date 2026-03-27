@@ -17,7 +17,7 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 
 <table>
 <tr><td><b>A real terminal interface</b></td><td>Full TUI with multiline editing, slash-command autocomplete, conversation history, interrupt-and-redirect, and streaming tool output.</td></tr>
-<tr><td><b>Lives where you do</b></td><td>Telegram, Discord, Slack, WhatsApp, Signal, and CLI — all from a single gateway process. Voice memo transcription, cross-platform conversation continuity.</td></tr>
+<tr><td><b>Lives where you do</b></td><td>Telegram, Discord, Slack, WhatsApp, Signal, Sendblue, SMS, Email, and CLI — all from a single gateway process. Voice memo transcription, cross-platform conversation continuity.</td></tr>
 <tr><td><b>A closed learning loop</b></td><td>Agent-curated memory with periodic nudges. Autonomous skill creation after complex tasks. Skills self-improve during use. FTS5 session search with LLM summarization for cross-session recall. <a href="https://github.com/plastic-labs/honcho">Honcho</a> dialectic user modeling. Compatible with the <a href="https://agentskills.io">agentskills.io</a> open standard.</td></tr>
 <tr><td><b>Scheduled automations</b></td><td>Built-in cron scheduler with delivery to any platform. Daily reports, nightly backups, weekly audits — all in natural language, running unattended.</td></tr>
 <tr><td><b>Delegates and parallelizes</b></td><td>Spawn isolated subagents for parallel workstreams. Write Python scripts that call tools via RPC, collapsing multi-step pipelines into zero-context-cost turns.</td></tr>
@@ -53,7 +53,7 @@ hermes              # Interactive CLI — start a conversation
 hermes model        # Choose your LLM provider and model
 hermes tools        # Configure which tools are enabled
 hermes config set   # Set individual config values
-hermes gateway      # Start the messaging gateway (Telegram, Discord, etc.)
+hermes gateway      # Start the messaging gateway (Telegram, Discord, Sendblue, etc.)
 hermes setup        # Run the full setup wizard (configures everything at once)
 hermes claw migrate # Migrate from OpenClaw (if coming from OpenClaw)
 hermes update       # Update to the latest version
@@ -64,7 +64,7 @@ hermes doctor       # Diagnose any issues
 
 ## CLI vs Messaging Quick Reference
 
-Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.
+Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, Sendblue, SMS, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.
 
 | Action | CLI | Messaging platforms |
 |---------|-----|---------------------|
@@ -80,6 +80,57 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
+## Sendblue Gateway Setup
+
+Hermes now supports Sendblue as a first-class gateway channel for iMessage, SMS, and RCS.
+
+### Config
+
+`hermes gateway setup` now writes Sendblue into `~/.hermes/config.yaml`. For manual setup, add:
+
+```yaml
+platforms:
+  sendblue:
+    enabled: true
+    api_key: your_api_key
+    extra:
+      api_secret: your_api_secret
+      from_number: "+15551234567"
+      allowed_users: "+15559876543,+15551112222"
+      webhook_port: 8645
+      webhook_path: /webhooks/sendblue
+    home_channel:
+      platform: sendblue
+      chat_id: "+15559876543"
+      name: Home
+
+platform_toolsets:
+  sendblue:
+    - hermes-sendblue
+```
+
+### Webhook endpoint
+
+Point Sendblue receive, outbound, and typing-indicator webhooks at:
+
+```text
+https://your-server:8645/webhooks/sendblue
+```
+
+Webhook secret note:
+
+> For now, do **not** configure `webhook_secret` or `webhook_secret_header` for Sendblue in Hermes. We found that Sendblue webhook-secret handling still needs further debugging, and enabling it can cause valid webhooks to be rejected.
+
+### Behavior
+
+- assistant replies are automatically stripped to plain text
+- media attachments send and receive natively
+- typing indicators are sent automatically while Hermes is working
+- iMessage DMs are automatically marked as read
+- tapback reactions are available through the Sendblue-specific `sendblue_action` tool
+
+Environment-variable overrides are still supported, but `config.yaml` is now the primary setup path. See the full [Sendblue setup guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/sendblue).
+
 ---
 
 ## Documentation
@@ -91,7 +142,7 @@ All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes
 | [Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) | Install → setup → first conversation in 2 minutes |
 | [CLI Usage](https://hermes-agent.nousresearch.com/docs/user-guide/cli) | Commands, keybindings, personalities, sessions |
 | [Configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration) | Config file, providers, models, all options |
-| [Messaging Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/messaging) | Telegram, Discord, Slack, WhatsApp, Signal, Home Assistant |
+| [Messaging Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/messaging) | Telegram, Discord, Slack, WhatsApp, Signal, Sendblue, SMS, Email, Home Assistant |
 | [Security](https://hermes-agent.nousresearch.com/docs/user-guide/security) | Command approval, DM pairing, container isolation |
 | [Tools & Toolsets](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools) | 40+ tools, toolset system, terminal backends |
 | [Skills System](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) | Procedural memory, Skills Hub, creating skills |

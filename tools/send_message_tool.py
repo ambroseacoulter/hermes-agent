@@ -15,6 +15,7 @@ import time
 logger = logging.getLogger(__name__)
 
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
+_PHONE_TARGET_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a"}
@@ -41,7 +42,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567'"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567', 'sendblue:+15551234567'"
             },
             "message": {
                 "type": "string",
@@ -130,6 +131,7 @@ def _handle_send(args):
         "dingtalk": Platform.DINGTALK,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "sendblue": Platform.SENDBLUE,
     }
     platform = platform_map.get(platform_name)
     if not platform:
@@ -199,6 +201,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if match:
             return match.group(1), match.group(2), True
     if target_ref.lstrip("-").isdigit():
+        return target_ref, None, True
+    if platform_name in {"signal", "sms", "sendblue"} and _PHONE_TARGET_RE.fullmatch(target_ref):
         return target_ref, None, True
     return None, None, False
 
@@ -315,22 +319,23 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         return last_result
 
     # --- Non-Telegram platforms ---
-    if media_files and not message.strip():
-        return {
-            "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram; "
-                f"target {platform.value} had only media attachments"
-            )
-        }
     warning = None
-    if media_files:
+    if media_files and platform not in {Platform.SENDBLUE}:
+        if not message.strip():
+            return {
+                "error": (
+                    f"send_message MEDIA delivery is currently only supported for telegram and sendblue; "
+                    f"target {platform.value} had only media attachments"
+                )
+            }
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram"
+            "native send_message media delivery is currently only supported for telegram and sendblue"
         )
 
     last_result = None
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
         if platform == Platform.DISCORD:
             result = await _send_discord(pconfig.token, chat_id, chunk)
         elif platform == Platform.SLACK:
@@ -343,6 +348,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_email(pconfig.extra, chat_id, chunk)
         elif platform == Platform.SMS:
             result = await _send_sms(pconfig.api_key, chat_id, chunk)
+        elif platform == Platform.SENDBLUE:
+            result = await _send_sendblue(pconfig, chat_id, chunk, media_files if is_last else [])
         else:
             result = {"error": f"Direct sending not yet implemented for {platform.value}"}
 
@@ -611,6 +618,39 @@ async def _send_email(extra, chat_id, message):
         return {"success": True, "platform": "email", "chat_id": chat_id}
     except Exception as e:
         return {"error": f"Email send failed: {e}"}
+
+
+async def _send_sendblue(pconfig, chat_id, message, media_files=None):
+    """Send a single Sendblue message with optional media attachment."""
+    from gateway.platforms.sendblue import (
+        get_sendblue_settings,
+        sendblue_send_message,
+        upload_sendblue_file,
+    )
+
+    settings = get_sendblue_settings(pconfig)
+    if not (settings.api_key and settings.api_secret and settings.from_number):
+        return {"error": "Sendblue not configured (SENDBLUE_API_KEY, SENDBLUE_API_SECRET, SENDBLUE_FROM_NUMBER required)"}
+
+    media_url = None
+    warning = None
+    media_files = media_files or []
+    if media_files:
+        media_path, _is_voice = media_files[0]
+        ok, media_url, body = await upload_sendblue_file(settings, media_path)
+        if not ok or not media_url:
+            return {"error": body.get("message") or body.get("error_message") or str(body)}
+        if len(media_files) > 1:
+            warning = "Sendblue send_message currently sends only the first MEDIA attachment"
+
+    result = await sendblue_send_message(settings, chat_id, message, media_url=media_url)
+    if not result.success:
+        return {"error": result.error or "Sendblue send failed", "raw_response": result.raw_response}
+
+    payload = {"success": True, "message_id": result.message_id, "platform": "sendblue"}
+    if warning:
+        payload["warnings"] = [warning]
+    return payload
 
 
 async def _send_sms(auth_token, chat_id, message):

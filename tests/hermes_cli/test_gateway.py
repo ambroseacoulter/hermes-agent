@@ -252,3 +252,35 @@ class TestWaitForGatewayExit:
 
         # Should not raise — ProcessLookupError means it's already gone.
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=2.0)
+
+
+def test_sync_sendblue_config_yaml_persists_platform_and_toolset(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+    monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+    monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+    monkeypatch.setenv("SENDBLUE_ALLOWED_USERS", "+15557654321")
+    monkeypatch.setenv("SENDBLUE_HOME_CHANNEL", "+15557654321")
+
+    gateway._sync_sendblue_config_yaml()
+
+    import yaml
+
+    saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    sendblue_cfg = saved["platforms"]["sendblue"]
+
+    assert sendblue_cfg["enabled"] is True
+    assert sendblue_cfg["api_key"] == "key"
+    assert sendblue_cfg["extra"]["api_secret"] == "secret"
+    assert sendblue_cfg["extra"]["from_number"] == "+15551234567"
+    assert sendblue_cfg["extra"]["allowed_users"] == "+15557654321"
+    assert sendblue_cfg["home_channel"]["chat_id"] == "+15557654321"
+    assert saved["platform_toolsets"]["sendblue"] == ["hermes-sendblue"]
+
+
+def test_sendblue_setup_flow_omits_webhook_secret_prompts():
+    sendblue = next(platform for platform in gateway._PLATFORMS if platform["key"] == "sendblue")
+    var_names = [var["name"] for var in sendblue["vars"]]
+
+    assert "SENDBLUE_WEBHOOK_SECRET" not in var_names
+    assert "SENDBLUE_WEBHOOK_SECRET_HEADER" not in var_names
