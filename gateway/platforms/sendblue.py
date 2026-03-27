@@ -47,6 +47,7 @@ SENDBLUE_API_BASE = "https://api.sendblue.co"
 DEFAULT_WEBHOOK_HOST = "0.0.0.0"
 DEFAULT_WEBHOOK_PORT = 8645
 DEFAULT_WEBHOOK_PATH = "/webhooks/sendblue"
+DEFAULT_WEBHOOK_SECRET_HEADER = "sb-signing-secret"
 DEFAULT_TIMEOUT = 30.0
 MAX_MESSAGE_LENGTH = 4000
 MAX_BODY_BYTES = 1_048_576
@@ -56,6 +57,7 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
 _VIDEO_EXTS = {".mp4", ".mov", ".m4v"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a", ".aac", ".caf"}
 _DEFAULT_SECRET_HEADERS = (
+    DEFAULT_WEBHOOK_SECRET_HEADER,
     "X-Sendblue-Secret",
     "X-Webhook-Secret",
     "X-Webhook-Token",
@@ -106,7 +108,7 @@ class SendblueSettings:
     webhook_port: int = DEFAULT_WEBHOOK_PORT
     webhook_path: str = DEFAULT_WEBHOOK_PATH
     webhook_secret: str = ""
-    webhook_secret_header: str = ""
+    webhook_secret_header: str = DEFAULT_WEBHOOK_SECRET_HEADER
     auto_mark_read: bool = True
     status_callback_url: str = ""
     timeout_seconds: float = DEFAULT_TIMEOUT
@@ -166,7 +168,7 @@ def get_sendblue_settings(config: Optional[PlatformConfig] = None) -> SendblueSe
         webhook_port=port,
         webhook_path=_clean_webhook_path(str(_resolve_setting(config, "webhook_path", "SENDBLUE_WEBHOOK_PATH", DEFAULT_WEBHOOK_PATH) or DEFAULT_WEBHOOK_PATH)),
         webhook_secret=str(_resolve_setting(config, "webhook_secret", "SENDBLUE_WEBHOOK_SECRET", "") or "").strip(),
-        webhook_secret_header=str(_resolve_setting(config, "webhook_secret_header", "SENDBLUE_WEBHOOK_SECRET_HEADER", "") or "").strip(),
+        webhook_secret_header=str(_resolve_setting(config, "webhook_secret_header", "SENDBLUE_WEBHOOK_SECRET_HEADER", DEFAULT_WEBHOOK_SECRET_HEADER) or DEFAULT_WEBHOOK_SECRET_HEADER).strip() or DEFAULT_WEBHOOK_SECRET_HEADER,
         auto_mark_read=_coerce_bool(_resolve_setting(config, "auto_mark_read", "SENDBLUE_AUTO_MARK_READ", True), True),
         status_callback_url=str(_resolve_setting(config, "status_callback_url", "SENDBLUE_STATUS_CALLBACK_URL", "") or "").strip(),
         timeout_seconds=timeout_seconds,

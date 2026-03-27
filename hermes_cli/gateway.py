@@ -1212,7 +1212,7 @@ _PLATFORMS = [
             "2. Pick the Sendblue line number Hermes should send from",
             "3. Point Sendblue receive/outbound/typing webhooks at:",
             "   https://your-server:8645/webhooks/sendblue",
-            "4. Do not configure Sendblue webhook secrets in Hermes yet — leave secret/header fields unset for now",
+            "4. If you use a Sendblue webhook secret, use sb-signing-secret as the header name (default)",
             "5. Optionally restrict access with an allowlist of approved phone numbers",
         ],
         "vars": [
@@ -1224,6 +1224,10 @@ _PLATFORMS = [
              "help": "The Sendblue line Hermes should send messages from."},
             {"name": "SENDBLUE_WEBHOOK_PORT", "prompt": "Webhook port (default 8645)", "password": False,
              "help": "Port for inbound Sendblue webhooks. Leave blank to use 8645."},
+            {"name": "SENDBLUE_WEBHOOK_SECRET", "prompt": "Webhook secret (optional; leave blank to disable)", "password": True,
+             "help": "Optional shared secret Hermes expects on incoming Sendblue webhooks."},
+            {"name": "SENDBLUE_WEBHOOK_SECRET_HEADER", "prompt": "Webhook secret header name", "password": False, "default": "sb-signing-secret",
+             "help": "Header Sendblue uses for the webhook secret. Press enter to use sb-signing-secret."},
             {"name": "SENDBLUE_ALLOWED_USERS", "prompt": "Allowed phone numbers (comma-separated, E.164 format)", "password": False,
              "is_allowlist": True,
              "help": "Only messages from these phone numbers will be processed."},
@@ -1318,6 +1322,11 @@ def _sync_sendblue_config_yaml() -> None:
             extra["webhook_port"] = int(webhook_port)
         except ValueError:
             extra["webhook_port"] = webhook_port
+
+    webhook_secret = get_env_value("SENDBLUE_WEBHOOK_SECRET") or extra.get("webhook_secret")
+    webhook_secret_header = get_env_value("SENDBLUE_WEBHOOK_SECRET_HEADER") or extra.get("webhook_secret_header")
+    if webhook_secret and not webhook_secret_header:
+        extra["webhook_secret_header"] = "sb-signing-secret"
 
     auto_mark_read = get_env_value("SENDBLUE_AUTO_MARK_READ")
     if auto_mark_read:
@@ -1506,7 +1515,7 @@ def _setup_standard_platform(platform: dict):
                     print_info("  Skipped — configure later with 'hermes gateway setup'")
             continue
 
-        value = prompt(f"  {var['prompt']}", password=var.get("password", False))
+        value = prompt(f"  {var['prompt']}", default=var.get("default"), password=var.get("password", False))
         if value:
             save_env_value(var["name"], value)
             print_success(f"  Saved {var['name']}")

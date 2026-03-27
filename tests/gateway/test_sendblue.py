@@ -65,6 +65,24 @@ class TestSendblueConfigLoading:
 
 
 class TestSendblueFormatAndRequirements:
+    def test_sendblue_settings_default_secret_header(self, monkeypatch):
+        from gateway.platforms.sendblue import get_sendblue_settings
+
+        monkeypatch.delenv("SENDBLUE_WEBHOOK_SECRET_HEADER", raising=False)
+        settings = get_sendblue_settings(
+            PlatformConfig(
+                enabled=True,
+                api_key="key",
+                extra={
+                    "api_secret": "secret",
+                    "from_number": "+15551234567",
+                    "webhook_secret": "webhook-secret",
+                },
+            )
+        )
+
+        assert settings.webhook_secret_header == "sb-signing-secret"
+
     def test_config_yaml_loads_sendblue_platform(self, tmp_path, monkeypatch):
         from gateway.config import load_gateway_config
 

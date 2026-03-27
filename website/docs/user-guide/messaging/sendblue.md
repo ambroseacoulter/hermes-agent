@@ -17,6 +17,10 @@ Hermes integrates with [Sendblue](https://sendblue.com/) as a first-class messag
 - A publicly reachable HTTPS endpoint for webhooks
 - `aiohttp` and `httpx` available in your Hermes environment
 
+:::warning Sendblue free plan onboarding
+On the Sendblue free plan, you must first add yourself as a contact in [Sendblue Conversations](https://dashboard.sendblue.com/conversations) by clicking **Add Contact** and following the setup flow. After that, send an iMessage from your phone to your Sendblue number to verify ownership. If you skip those steps, Sendblue messaging will not work.
+:::
+
 :::tip
 If you already installed Hermes with the normal gateway extras, you likely already have what you need. The Sendblue adapter uses the same Hermes gateway process as Telegram, Slack, and the other messaging channels.
 :::
@@ -24,6 +28,8 @@ If you already installed Hermes with the normal gateway extras, you likely alrea
 ---
 
 ## Step 1: Get Your Sendblue Credentials
+
+If you are using the Sendblue free plan, complete the contact-add + iMessage ownership verification steps above before testing Hermes.
 
 From the Sendblue dashboard / API credentials page, copy:
 
@@ -41,7 +47,7 @@ From the Sendblue dashboard / API credentials page, copy:
 hermes gateway setup
 ```
 
-Select **Sendblue** from the platform list. Hermes writes the Sendblue gateway config into `~/.hermes/config.yaml` and seeds `platform_toolsets.sendblue` automatically.
+Select **Sendblue** from the platform list. Hermes writes the Sendblue gateway config into `~/.hermes/config.yaml`, seeds `platform_toolsets.sendblue` automatically, and defaults the webhook secret header prompt to `sb-signing-secret`.
 
 ### Manual setup
 
@@ -58,6 +64,8 @@ platforms:
       allowed_users: "+15559876543,+15551112222"
       webhook_port: 8645
       webhook_path: /webhooks/sendblue
+      webhook_secret: your_shared_secret
+      webhook_secret_header: sb-signing-secret
     home_channel:
       platform: sendblue
       chat_id: "+15559876543"
@@ -90,8 +98,20 @@ Recommended webhook types:
 - `outbound`
 - `typing_indicator`
 
-:::warning Do not configure webhook secrets yet
-For now, do **not** set `platforms.sendblue.extra.webhook_secret` or `platforms.sendblue.extra.webhook_secret_header` in Hermes, and do **not** enable a Sendblue webhook secret for this integration. We have confirmed webhook-secret handling still needs further debugging, and enabling it can cause Hermes to reject valid Sendblue webhooks with `401 Invalid webhook secret`.
+If you enable a Sendblue webhook secret, configure Hermes like this:
+
+```yaml
+platforms:
+  sendblue:
+    extra:
+      webhook_secret: your_shared_secret
+      webhook_secret_header: sb-signing-secret
+```
+
+Use `sb-signing-secret` unless you have explicitly configured Sendblue to send the secret in a different header. If you leave `webhook_secret` blank or omit it entirely, Hermes will not require a webhook secret.
+
+:::tip
+`hermes gateway setup` defaults the webhook secret header prompt to `sb-signing-secret`, so you can usually just press Enter to accept it.
 :::
 
 Optional listener overrides:
@@ -174,8 +194,8 @@ Most users should configure Sendblue in `~/.hermes/config.yaml`.
 | `platforms.sendblue.extra.webhook_host` | No | Webhook bind address (default: `0.0.0.0`) |
 | `platforms.sendblue.extra.webhook_port` | No | Webhook port (default: `8645`) |
 | `platforms.sendblue.extra.webhook_path` | No | Webhook path (default: `/webhooks/sendblue`) |
-| `platforms.sendblue.extra.webhook_secret` | Avoid for now | Not recommended currently; webhook-secret support still needs further debugging |
-| `platforms.sendblue.extra.webhook_secret_header` | Avoid for now | Not recommended currently; webhook-secret support still needs further debugging |
+| `platforms.sendblue.extra.webhook_secret` | No | Optional shared secret Hermes expects on inbound webhooks; leave blank to disable secret validation |
+| `platforms.sendblue.extra.webhook_secret_header` | No | Header name for the webhook secret (default: `sb-signing-secret`) |
 | `platforms.sendblue.extra.auto_mark_read` | No | Automatically mark inbound iMessage DMs as read (default: `true`) |
 | `platforms.sendblue.extra.status_callback_url` | No | Optional status callback URL for direct outbound Sendblue sends |
 | `platform_toolsets.sendblue` | No | Toolset list for Sendblue sessions (defaults to `hermes-sendblue`) |
@@ -235,7 +255,7 @@ platforms:
 
 1. Confirm your Sendblue webhook URL is public and HTTPS
 2. Verify `platforms.sendblue.extra.webhook_port` / `platforms.sendblue.extra.webhook_path` match the URL configured in Sendblue
-3. If you enabled `platforms.sendblue.extra.webhook_secret` or `platforms.sendblue.extra.webhook_secret_header`, remove them for now and retry — webhook-secret support still needs further debugging
+3. If you enabled a webhook secret, verify `platforms.sendblue.extra.webhook_secret` matches Sendblue and `platforms.sendblue.extra.webhook_secret_header` is `sb-signing-secret` unless you intentionally changed it
 4. Check Hermes gateway logs for Sendblue webhook validation or parse errors
 
 ### Hermes can receive but not send

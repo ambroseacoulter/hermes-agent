@@ -190,8 +190,8 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `SENDBLUE_WEBHOOK_HOST` | Bind address for the Sendblue webhook listener (default: `0.0.0.0`) |
 | `SENDBLUE_WEBHOOK_PORT` | Port for inbound Sendblue webhooks (default: `8645`) |
 | `SENDBLUE_WEBHOOK_PATH` | HTTP path for inbound Sendblue webhooks (default: `/webhooks/sendblue`) |
-| `SENDBLUE_WEBHOOK_SECRET` | Shared secret Hermes expects on inbound Sendblue webhooks |
-| `SENDBLUE_WEBHOOK_SECRET_HEADER` | Custom request header name containing the Sendblue webhook secret |
+| `SENDBLUE_WEBHOOK_SECRET` | Optional shared secret Hermes expects on inbound Sendblue webhooks; leave unset to disable secret validation |
+| `SENDBLUE_WEBHOOK_SECRET_HEADER` | Header name containing the Sendblue webhook secret (default: `sb-signing-secret`) |
 | `SENDBLUE_AUTO_MARK_READ` | Automatically mark inbound iMessage DMs as read (`true`/`false`, default: `true`) |
 | `SENDBLUE_STATUS_CALLBACK_URL` | Optional per-message status callback URL for direct Sendblue sends |
 | `EMAIL_ADDRESS` | Email address for the Email gateway adapter |

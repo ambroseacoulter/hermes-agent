@@ -823,7 +823,7 @@ OPTIONAL_ENV_VARS = {
         "advanced": True,
     },
     "SENDBLUE_WEBHOOK_SECRET": {
-        "description": "Shared secret Hermes expects on inbound Sendblue webhooks",
+        "description": "Optional shared secret Hermes expects on inbound Sendblue webhooks",
         "prompt": "Sendblue webhook secret",
         "url": None,
         "password": True,
@@ -831,7 +831,7 @@ OPTIONAL_ENV_VARS = {
         "advanced": True,
     },
     "SENDBLUE_WEBHOOK_SECRET_HEADER": {
-        "description": "Custom request header name containing the Sendblue webhook secret",
+        "description": "Header name containing the Sendblue webhook secret (default: sb-signing-secret)",
         "prompt": "Sendblue webhook secret header",
         "url": None,
         "password": False,

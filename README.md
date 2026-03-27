@@ -86,6 +86,8 @@ Hermes now supports Sendblue as a first-class gateway channel for iMessage, SMS,
 
 ### Config
 
+On the Sendblue free plan, first add yourself as a contact in [Sendblue Conversations](https://dashboard.sendblue.com/conversations) and then send an iMessage from your phone to your Sendblue number to verify ownership. If you skip those steps, Hermes will not receive usable Sendblue messages.
+
 `hermes gateway setup` now writes Sendblue into `~/.hermes/config.yaml`. For manual setup, add:
 
 ```yaml
@@ -99,6 +101,8 @@ platforms:
       allowed_users: "+15559876543,+15551112222"
       webhook_port: 8645
       webhook_path: /webhooks/sendblue
+      webhook_secret: your_shared_secret
+      webhook_secret_header: sb-signing-secret
     home_channel:
       platform: sendblue
       chat_id: "+15559876543"
@@ -119,7 +123,7 @@ https://your-server:8645/webhooks/sendblue
 
 Webhook secret note:
 
-> For now, do **not** configure `webhook_secret` or `webhook_secret_header` for Sendblue in Hermes. We found that Sendblue webhook-secret handling still needs further debugging, and enabling it can cause valid webhooks to be rejected.
+> If you enable a Sendblue webhook secret, set `webhook_secret_header: sb-signing-secret` in Hermes (or accept that default in `hermes gateway setup`). Leave `webhook_secret` blank if you do not want Hermes to require a secret.
 
 ### Behavior
 

@@ -278,9 +278,34 @@ def test_sync_sendblue_config_yaml_persists_platform_and_toolset(monkeypatch, tm
     assert saved["platform_toolsets"]["sendblue"] == ["hermes-sendblue"]
 
 
-def test_sendblue_setup_flow_omits_webhook_secret_prompts():
+def test_sendblue_setup_flow_includes_webhook_secret_defaults():
     sendblue = next(platform for platform in gateway._PLATFORMS if platform["key"] == "sendblue")
-    var_names = [var["name"] for var in sendblue["vars"]]
+    vars_by_name = {var["name"]: var for var in sendblue["vars"]}
 
-    assert "SENDBLUE_WEBHOOK_SECRET" not in var_names
-    assert "SENDBLUE_WEBHOOK_SECRET_HEADER" not in var_names
+    assert "SENDBLUE_WEBHOOK_SECRET" in vars_by_name
+    assert vars_by_name["SENDBLUE_WEBHOOK_SECRET_HEADER"]["default"] == "sb-signing-secret"
+
+
+def test_sendblue_setup_flow_accepts_default_secret_header(monkeypatch):
+    sendblue = next(platform for platform in gateway._PLATFORMS if platform["key"] == "sendblue")
+    saved = {}
+    prompt_calls = []
+    answers = iter(["key", "secret", "+15551234567", "", "", "", "", ""])
+
+    def fake_prompt(message, default=None, password=False):
+        prompt_calls.append((message, default, password))
+        return next(answers) or default or ""
+
+    monkeypatch.setattr(gateway, "prompt", fake_prompt)
+    monkeypatch.setattr(gateway, "prompt_choice", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(gateway, "get_env_value", lambda key: None)
+    monkeypatch.setattr(gateway, "save_env_value", lambda key, value: saved.__setitem__(key, value))
+    monkeypatch.setattr(gateway, "_sync_sendblue_config_yaml", lambda: None)
+    monkeypatch.setattr(gateway, "_yaml_platform_config", lambda key: {})
+
+    gateway._setup_standard_platform(sendblue)
+
+    header_prompt = next(call for call in prompt_calls if "Webhook secret header name" in call[0])
+    assert header_prompt[1] == "sb-signing-secret"
+    assert saved["SENDBLUE_WEBHOOK_SECRET_HEADER"] == "sb-signing-secret"
+    assert "SENDBLUE_WEBHOOK_SECRET" not in saved
