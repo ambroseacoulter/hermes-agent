@@ -959,7 +959,7 @@ class GatewayRunner:
             for v in ("TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
                        "WHATSAPP_ALLOWED_USERS", "SLACK_ALLOWED_USERS",
                        "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
-                       "EMAIL_ALLOWED_USERS",
+                       "EMAIL_ALLOWED_USERS", "SENDBLUE_ALLOWED_USERS",
                        "SMS_ALLOWED_USERS", "MATTERMOST_ALLOWED_USERS",
                        "MATRIX_ALLOWED_USERS", "DINGTALK_ALLOWED_USERS",
                        "GATEWAY_ALLOWED_USERS")
@@ -969,8 +969,9 @@ class GatewayRunner:
             for v in ("TELEGRAM_ALLOW_ALL_USERS", "DISCORD_ALLOW_ALL_USERS",
                        "WHATSAPP_ALLOW_ALL_USERS", "SLACK_ALLOW_ALL_USERS",
                        "SIGNAL_ALLOW_ALL_USERS", "EMAIL_ALLOW_ALL_USERS",
-                       "SMS_ALLOW_ALL_USERS", "MATTERMOST_ALLOW_ALL_USERS",
-                       "MATRIX_ALLOW_ALL_USERS", "DINGTALK_ALLOW_ALL_USERS")
+                       "SENDBLUE_ALLOW_ALL_USERS", "SMS_ALLOW_ALL_USERS",
+                       "MATTERMOST_ALLOW_ALL_USERS", "MATRIX_ALLOW_ALL_USERS",
+                       "DINGTALK_ALLOW_ALL_USERS")
         )
         if not _any_allowlist and not _allow_all:
             logger.warning(
@@ -1406,6 +1407,13 @@ class GatewayRunner:
                 return None
             return SmsAdapter(config)
 
+        elif platform == Platform.SENDBLUE:
+            from gateway.platforms.sendblue import SendblueAdapter, check_sendblue_requirements
+            if not check_sendblue_requirements(config):
+                logger.warning("Sendblue: aiohttp/httpx not installed or SENDBLUE_API_KEY/SENDBLUE_API_SECRET/SENDBLUE_FROM_NUMBER not set")
+                return None
+            return SendblueAdapter(config)
+
         elif platform == Platform.DINGTALK:
             from gateway.platforms.dingtalk import DingTalkAdapter, check_dingtalk_requirements
             if not check_dingtalk_requirements():
@@ -1476,6 +1484,7 @@ class GatewayRunner:
             Platform.SIGNAL: "SIGNAL_ALLOWED_USERS",
             Platform.EMAIL: "EMAIL_ALLOWED_USERS",
             Platform.SMS: "SMS_ALLOWED_USERS",
+            Platform.SENDBLUE: "SENDBLUE_ALLOWED_USERS",
             Platform.MATTERMOST: "MATTERMOST_ALLOWED_USERS",
             Platform.MATRIX: "MATRIX_ALLOWED_USERS",
             Platform.DINGTALK: "DINGTALK_ALLOWED_USERS",
@@ -1488,6 +1497,7 @@ class GatewayRunner:
             Platform.SIGNAL: "SIGNAL_ALLOW_ALL_USERS",
             Platform.EMAIL: "EMAIL_ALLOW_ALL_USERS",
             Platform.SMS: "SMS_ALLOW_ALL_USERS",
+            Platform.SENDBLUE: "SENDBLUE_ALLOW_ALL_USERS",
             Platform.MATTERMOST: "MATTERMOST_ALLOW_ALL_USERS",
             Platform.MATRIX: "MATRIX_ALLOW_ALL_USERS",
             Platform.DINGTALK: "DINGTALK_ALLOW_ALL_USERS",

@@ -377,3 +377,22 @@ class TestAnthropicTokenMigration:
         }):
             migrate_config(interactive=False, quiet=True)
             assert load_env().get("ANTHROPIC_TOKEN") == "current-token"
+
+
+class TestSendblueOptionalEnvVarsRegistry:
+    def test_sendblue_api_key_registered(self):
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        assert "SENDBLUE_API_KEY" in OPTIONAL_ENV_VARS
+
+    def test_sendblue_from_number_registered(self):
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        assert "SENDBLUE_FROM_NUMBER" in OPTIONAL_ENV_VARS
+        assert OPTIONAL_ENV_VARS["SENDBLUE_FROM_NUMBER"]["category"] == "messaging"
+
+    def test_sendblue_env_vars_listed_by_version(self):
+        from hermes_cli.config import ENV_VARS_BY_VERSION
+
+        assert "SENDBLUE_API_KEY" in ENV_VARS_BY_VERSION[11]
+        assert "SENDBLUE_HOME_CHANNEL" in ENV_VARS_BY_VERSION[11]

@@ -131,8 +131,14 @@ TOOLSETS = {
     },
     
     "messaging": {
-        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
+        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, Sendblue, etc.",
         "tools": ["send_message"],
+        "includes": []
+    },
+
+    "sendblue": {
+        "description": "Sendblue-specific conversation actions like iMessage tapbacks and read receipts",
+        "tools": ["sendblue_action"],
         "includes": []
     },
     
@@ -339,10 +345,16 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-sendblue": {
+        "description": "Sendblue bot toolset - plain-text messaging with Sendblue-specific tapback/read tools",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": ["sendblue"]
+    },
+
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant", "hermes-email", "hermes-sms"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-sendblue"]
     }
 }
 

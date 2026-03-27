@@ -147,6 +147,7 @@ def _deliver_result(job: dict, content: str) -> None:
         "dingtalk": Platform.DINGTALK,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "sendblue": Platform.SENDBLUE,
     }
     platform = platform_map.get(platform_name.lower())
     if not platform:

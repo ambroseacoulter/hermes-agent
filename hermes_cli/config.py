@@ -38,6 +38,11 @@ _EXTRA_ENV_KEYS = frozenset({
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_REPLY_MODE",
     "MATRIX_PASSWORD", "MATRIX_ENCRYPTION", "MATRIX_HOME_ROOM",
+    "SENDBLUE_API_SECRET", "SENDBLUE_FROM_NUMBER",
+    "SENDBLUE_ALLOW_ALL_USERS", "SENDBLUE_HOME_CHANNEL", "SENDBLUE_HOME_CHANNEL_NAME",
+    "SENDBLUE_WEBHOOK_HOST", "SENDBLUE_WEBHOOK_PORT", "SENDBLUE_WEBHOOK_PATH",
+    "SENDBLUE_WEBHOOK_SECRET", "SENDBLUE_WEBHOOK_SECRET_HEADER",
+    "SENDBLUE_AUTO_MARK_READ", "SENDBLUE_STATUS_CALLBACK_URL",
 })
 
 import yaml
@@ -409,7 +414,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 10,
+    "_config_version": 11,
 }
 
 # =============================================================================
@@ -424,6 +429,10 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
     5: ["WHATSAPP_ENABLED", "WHATSAPP_MODE", "WHATSAPP_ALLOWED_USERS",
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
     10: ["TAVILY_API_KEY"],
+    11: [
+        "SENDBLUE_API_KEY", "SENDBLUE_API_SECRET", "SENDBLUE_FROM_NUMBER",
+        "SENDBLUE_ALLOWED_USERS", "SENDBLUE_HOME_CHANNEL",
+    ],
 }
 
 # Required environment variables with metadata for migration prompts.
@@ -759,6 +768,75 @@ OPTIONAL_ENV_VARS = {
         "url": "https://api.slack.com/apps",
         "password": True,
         "category": "messaging",
+    },
+    "SENDBLUE_API_KEY": {
+        "description": "Sendblue API key for iMessage, SMS, and RCS gateway access",
+        "prompt": "Sendblue API key",
+        "url": "https://sendblue.com/",
+        "password": True,
+        "category": "messaging",
+    },
+    "SENDBLUE_API_SECRET": {
+        "description": "Sendblue API secret paired with SENDBLUE_API_KEY",
+        "prompt": "Sendblue API secret",
+        "url": "https://sendblue.com/",
+        "password": True,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "SENDBLUE_FROM_NUMBER": {
+        "description": "Sendblue line number Hermes sends from (E.164 format)",
+        "prompt": "Sendblue from number",
+        "url": "https://sendblue.com/",
+        "password": False,
+        "category": "messaging",
+    },
+    "SENDBLUE_ALLOWED_USERS": {
+        "description": "Comma-separated E.164 phone numbers allowed to message Hermes via Sendblue",
+        "prompt": "Allowed Sendblue phone numbers (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "SENDBLUE_ALLOW_ALL_USERS": {
+        "description": "Allow all Sendblue users without an allowlist (true/false)",
+        "prompt": "Allow all Sendblue users (true/false)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "SENDBLUE_HOME_CHANNEL": {
+        "description": "Default Sendblue phone number or group_id for cron delivery",
+        "prompt": "Sendblue home channel",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "SENDBLUE_WEBHOOK_PORT": {
+        "description": "Port for inbound Sendblue webhooks (default: 8645)",
+        "prompt": "Sendblue webhook port",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "SENDBLUE_WEBHOOK_SECRET": {
+        "description": "Shared secret Hermes expects on inbound Sendblue webhooks",
+        "prompt": "Sendblue webhook secret",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "SENDBLUE_WEBHOOK_SECRET_HEADER": {
+        "description": "Custom request header name containing the Sendblue webhook secret",
+        "prompt": "Sendblue webhook secret header",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
     },
     "MATTERMOST_URL": {
         "description": "Mattermost server URL (e.g. https://mm.example.com)",
@@ -1758,9 +1836,30 @@ def show_config():
     
     telegram_token = get_env_value('TELEGRAM_BOT_TOKEN')
     discord_token = get_env_value('DISCORD_BOT_TOKEN')
+    sendblue_env = all([
+        get_env_value('SENDBLUE_API_KEY'),
+        get_env_value('SENDBLUE_API_SECRET'),
+        get_env_value('SENDBLUE_FROM_NUMBER'),
+    ])
+    platforms_cfg = config.get('platforms', {})
+    if not isinstance(platforms_cfg, dict):
+        platforms_cfg = {}
+    sendblue_cfg = platforms_cfg.get('sendblue', {})
+    if not isinstance(sendblue_cfg, dict):
+        sendblue_cfg = {}
+    sendblue_extra = sendblue_cfg.get('extra', {})
+    if not isinstance(sendblue_extra, dict):
+        sendblue_extra = {}
+    sendblue_configured = sendblue_env or bool(
+        sendblue_cfg.get('enabled')
+        and sendblue_cfg.get('api_key')
+        and sendblue_extra.get('api_secret')
+        and sendblue_extra.get('from_number')
+    )
     
     print(f"  Telegram:     {'configured' if telegram_token else color('not configured', Colors.DIM)}")
     print(f"  Discord:      {'configured' if discord_token else color('not configured', Colors.DIM)}")
+    print(f"  Sendblue:     {'configured' if sendblue_configured else color('not configured', Colors.DIM)}")
     
     print()
     print(color("─" * 60, Colors.DIM))

@@ -14,7 +14,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
-from hermes_cli.config import get_env_value, get_hermes_home, save_env_value, is_managed, managed_error
+from hermes_cli.config import load_config, get_env_value, get_hermes_home, save_config, save_env_value, is_managed, managed_error
 from hermes_cli.setup import (
     print_header, print_info, print_success, print_warning, print_error,
     prompt, prompt_choice, prompt_yes_no,
@@ -1203,6 +1203,35 @@ _PLATFORMS = [
         ],
     },
     {
+        "key": "sendblue",
+        "label": "Sendblue",
+        "emoji": "💙",
+        "token_var": "SENDBLUE_API_KEY",
+        "setup_instructions": [
+            "1. Create a Sendblue account at https://sendblue.com/ and copy your API key + secret",
+            "2. Pick the Sendblue line number Hermes should send from",
+            "3. Point Sendblue receive/outbound/typing webhooks at:",
+            "   https://your-server:8645/webhooks/sendblue",
+            "4. Do not configure Sendblue webhook secrets in Hermes yet — leave secret/header fields unset for now",
+            "5. Optionally restrict access with an allowlist of approved phone numbers",
+        ],
+        "vars": [
+            {"name": "SENDBLUE_API_KEY", "prompt": "Sendblue API key", "password": False,
+             "help": "Found in the Sendblue dashboard/API credentials page."},
+            {"name": "SENDBLUE_API_SECRET", "prompt": "Sendblue API secret", "password": True,
+             "help": "Found in the Sendblue dashboard/API credentials page."},
+            {"name": "SENDBLUE_FROM_NUMBER", "prompt": "Sendblue from number (E.164 format, e.g. +15551234567)", "password": False,
+             "help": "The Sendblue line Hermes should send messages from."},
+            {"name": "SENDBLUE_WEBHOOK_PORT", "prompt": "Webhook port (default 8645)", "password": False,
+             "help": "Port for inbound Sendblue webhooks. Leave blank to use 8645."},
+            {"name": "SENDBLUE_ALLOWED_USERS", "prompt": "Allowed phone numbers (comma-separated, E.164 format)", "password": False,
+             "is_allowlist": True,
+             "help": "Only messages from these phone numbers will be processed."},
+            {"name": "SENDBLUE_HOME_CHANNEL", "prompt": "Home channel phone number or group_id (for cron/notification delivery, or empty)", "password": False,
+             "help": "Target for cron job results and notifications."},
+        ],
+    },
+    {
         "key": "dingtalk",
         "label": "DingTalk",
         "emoji": "💬",
@@ -1223,6 +1252,100 @@ _PLATFORMS = [
 ]
 
 
+def _yaml_platform_config(platform_key: str) -> dict:
+    config = load_config()
+    platforms = config.get("platforms", {})
+    if not isinstance(platforms, dict):
+        return {}
+    platform_cfg = platforms.get(platform_key, {})
+    return platform_cfg if isinstance(platform_cfg, dict) else {}
+
+
+def _sendblue_yaml_status() -> str:
+    sendblue_cfg = _yaml_platform_config("sendblue")
+    if not sendblue_cfg:
+        return "not configured"
+    extra = sendblue_cfg.get("extra", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    if sendblue_cfg.get("enabled") and sendblue_cfg.get("api_key") and extra.get("api_secret") and extra.get("from_number"):
+        return "configured"
+    return "partially configured"
+
+
+def _sync_sendblue_config_yaml() -> None:
+    config = load_config()
+    platforms = config.setdefault("platforms", {})
+    if not isinstance(platforms, dict):
+        platforms = {}
+        config["platforms"] = platforms
+
+    sendblue_cfg = platforms.get("sendblue", {})
+    if not isinstance(sendblue_cfg, dict):
+        sendblue_cfg = {}
+    extra = sendblue_cfg.get("extra", {})
+    if not isinstance(extra, dict):
+        extra = {}
+
+    api_key = get_env_value("SENDBLUE_API_KEY") or sendblue_cfg.get("api_key")
+    api_secret = get_env_value("SENDBLUE_API_SECRET") or extra.get("api_secret")
+    from_number = get_env_value("SENDBLUE_FROM_NUMBER") or extra.get("from_number")
+
+    sendblue_cfg["enabled"] = True
+    if api_key:
+        sendblue_cfg["api_key"] = api_key
+    if api_secret:
+        extra["api_secret"] = api_secret
+    if from_number:
+        extra["from_number"] = from_number
+
+    for env_name, config_key in (
+        ("SENDBLUE_ALLOWED_USERS", "allowed_users"),
+        ("SENDBLUE_ALLOW_ALL_USERS", "allow_all_users"),
+        ("SENDBLUE_WEBHOOK_HOST", "webhook_host"),
+        ("SENDBLUE_WEBHOOK_PATH", "webhook_path"),
+        ("SENDBLUE_WEBHOOK_SECRET", "webhook_secret"),
+        ("SENDBLUE_WEBHOOK_SECRET_HEADER", "webhook_secret_header"),
+        ("SENDBLUE_STATUS_CALLBACK_URL", "status_callback_url"),
+    ):
+        value = get_env_value(env_name)
+        if value:
+            extra[config_key] = value
+
+    webhook_port = get_env_value("SENDBLUE_WEBHOOK_PORT")
+    if webhook_port:
+        try:
+            extra["webhook_port"] = int(webhook_port)
+        except ValueError:
+            extra["webhook_port"] = webhook_port
+
+    auto_mark_read = get_env_value("SENDBLUE_AUTO_MARK_READ")
+    if auto_mark_read:
+        extra["auto_mark_read"] = auto_mark_read.lower() in ("true", "1", "yes", "on")
+
+    home_channel = get_env_value("SENDBLUE_HOME_CHANNEL")
+    existing_home = sendblue_cfg.get("home_channel", {})
+    if not isinstance(existing_home, dict):
+        existing_home = {}
+    if home_channel:
+        sendblue_cfg["home_channel"] = {
+            "platform": "sendblue",
+            "chat_id": home_channel,
+            "name": get_env_value("SENDBLUE_HOME_CHANNEL_NAME") or existing_home.get("name") or "Home",
+        }
+
+    sendblue_cfg["extra"] = extra
+    platforms["sendblue"] = sendblue_cfg
+
+    platform_toolsets = config.setdefault("platform_toolsets", {})
+    if not isinstance(platform_toolsets, dict):
+        platform_toolsets = {}
+        config["platform_toolsets"] = platform_toolsets
+    platform_toolsets.setdefault("sendblue", ["hermes-sendblue"])
+
+    save_config(config)
+
+
 def _platform_status(platform: dict) -> str:
     """Return a plain-text status string for a platform.
 
@@ -1231,6 +1354,14 @@ def _platform_status(platform: dict) -> str:
     """
     token_var = platform["token_var"]
     val = get_env_value(token_var)
+    if platform.get("key") == "sendblue":
+        secret = get_env_value("SENDBLUE_API_SECRET")
+        from_number = get_env_value("SENDBLUE_FROM_NUMBER")
+        if val and secret and from_number:
+            return "configured"
+        if val or secret or from_number:
+            return "partially configured"
+        return _sendblue_yaml_status()
     if token_var == "WHATSAPP_ENABLED":
         if val and val.lower() == "true":
             session_file = get_hermes_home() / "whatsapp" / "session" / "creds.json"
@@ -1315,6 +1446,9 @@ def _setup_standard_platform(platform: dict):
             print_info(f"  {line}")
 
     existing_token = get_env_value(token_var)
+    if not existing_token:
+        yaml_cfg = _yaml_platform_config(platform.get("key", ""))
+        existing_token = yaml_cfg.get("token") or yaml_cfg.get("api_key")
     if existing_token:
         print()
         print_success(f"{label} is already configured.")
@@ -1381,6 +1515,9 @@ def _setup_standard_platform(platform: dict):
             return
         else:
             print_info("  Skipped (can configure later)")
+
+    if platform.get("key") == "sendblue":
+        _sync_sendblue_config_yaml()
 
     # If an allowlist was set and home channel wasn't, offer to reuse
     # the first user ID (common for Telegram DMs).
