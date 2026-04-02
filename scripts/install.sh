@@ -26,8 +26,8 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"
-REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
+REPO_URL_SSH="${HERMES_REPO_URL_SSH:-git@github.com:NousResearch/hermes-agent.git}"
+REPO_URL_HTTPS="${HERMES_REPO_URL_HTTPS:-https://github.com/NousResearch/hermes-agent.git}"
 HERMES_HOME="$HOME/.hermes"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
 PYTHON_VERSION="3.11"
@@ -565,6 +565,12 @@ clone_repo() {
         if [ -d "$INSTALL_DIR/.git" ]; then
             log_info "Existing installation found, updating..."
             cd "$INSTALL_DIR"
+
+            current_origin="$(git remote get-url origin 2>/dev/null || true)"
+            if [ -n "$current_origin" ] && [ "$current_origin" != "$REPO_URL_HTTPS" ] && [ "$current_origin" != "$REPO_URL_SSH" ]; then
+                log_info "Updating origin remote to $REPO_URL_HTTPS..."
+                git remote set-url origin "$REPO_URL_HTTPS"
+            fi
 
             local autostash_ref=""
             if [ -n "$(git status --porcelain)" ]; then

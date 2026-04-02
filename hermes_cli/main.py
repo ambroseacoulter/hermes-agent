@@ -2996,26 +2996,36 @@ def cmd_update(args):
         )
         current_branch = result.stdout.strip()
 
-        # Always update against main
         branch = "main"
+        if current_branch not in ("", "HEAD"):
+            remote_branch = subprocess.run(
+                git_cmd + ["rev-parse", "--verify", f"origin/{current_branch}"],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if remote_branch.returncode == 0:
+                branch = current_branch
+            else:
+                print(
+                    f"  ⚠ Current branch '{current_branch}' has no matching origin branch; "
+                    "falling back to main for update..."
+                )
 
-        # If user is on a non-main branch or detached HEAD, switch to main
-        if current_branch != "main":
+        auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+        prompt_for_restore = auto_stash_ref is not None and sys.stdin.isatty() and sys.stdout.isatty()
+
+        # If we're not already on the branch we're updating, switch first.
+        if current_branch != branch:
             label = "detached HEAD" if current_branch == "HEAD" else f"branch '{current_branch}'"
-            print(f"  ⚠ Currently on {label} — switching to main for update...")
-            # Stash before checkout so uncommitted work isn't lost
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            print(f"  ⚠ Currently on {label} — switching to {branch} for update...")
             subprocess.run(
-                git_cmd + ["checkout", "main"],
+                git_cmd + ["checkout", branch],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
                 check=True,
             )
-        else:
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
-
-        prompt_for_restore = auto_stash_ref is not None and sys.stdin.isatty() and sys.stdout.isatty()
 
         # Check if there are updates
         result = subprocess.run(
@@ -3035,7 +3045,7 @@ def cmd_update(args):
                     git_cmd, PROJECT_ROOT, auto_stash_ref,
                     prompt_user=prompt_for_restore,
                 )
-            if current_branch not in ("main", "HEAD"):
+            if current_branch not in (branch, "HEAD"):
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
                     cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
