@@ -6,7 +6,7 @@ import types
 
 from hermes_cli.auth import get_active_provider
 from hermes_cli.config import load_config, save_config
-from hermes_cli.setup import setup_model_provider
+from hermes_cli.setup import setup_model_provider, setup_gateway
 
 
 def _maybe_keep_current_tts(question, choices):
@@ -222,6 +222,20 @@ def test_codex_setup_uses_runtime_access_token_for_live_model_list(tmp_path, mon
     reloaded = load_config()
     assert isinstance(reloaded["model"], dict)
     assert reloaded["model"]["provider"] == "openai-codex"
+
+
+def test_setup_gateway_delegates_to_gateway_subcommand(monkeypatch):
+    config = {}
+    calls = []
+
+    monkeypatch.setattr(
+        "hermes_cli.gateway.gateway_setup",
+        lambda: calls.append("gateway"),
+    )
+
+    setup_gateway(config)
+
+    assert calls == ["gateway"]
 
 
 def test_modal_setup_can_use_nous_subscription_without_modal_creds(tmp_path, monkeypatch, capsys):
