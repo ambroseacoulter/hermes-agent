@@ -58,6 +58,7 @@ class Platform(Enum):
     HOMEASSISTANT = "homeassistant"
     EMAIL = "email"
     SMS = "sms"
+    SENDBLUE = "sendblue"
     DINGTALK = "dingtalk"
     API_SERVER = "api_server"
     WEBHOOK = "webhook"
@@ -259,8 +260,11 @@ class GatewayConfig:
         for platform, config in self.platforms.items():
             if not config.enabled:
                 continue
+            if platform == Platform.SENDBLUE:
+                if config.api_key and config.extra.get("api_secret") and config.extra.get("from_number"):
+                    connected.append(platform)
             # Platforms that use token/api_key auth
-            if config.token or config.api_key:
+            elif config.token or config.api_key:
                 connected.append(platform)
             # WhatsApp uses enabled flag only (bridge handles auth)
             elif platform == Platform.WHATSAPP:
@@ -504,6 +508,52 @@ def load_gateway_config() -> GatewayConfig:
                         merged["extra"] = merged_extra
                     platforms_data[plat_name] = merged
                 gw_data["platforms"] = platforms_data
+
+            sendblue_cfg = platforms_data.get("sendblue", {})
+            if isinstance(sendblue_cfg, dict) and sendblue_cfg.get("enabled", True):
+                sendblue_extra = sendblue_cfg.get("extra", {})
+                if not isinstance(sendblue_extra, dict):
+                    sendblue_extra = {}
+                sendblue_env_map = {
+                    "api_key": "SENDBLUE_API_KEY",
+                    "api_secret": "SENDBLUE_API_SECRET",
+                    "from_number": "SENDBLUE_FROM_NUMBER",
+                    "allowed_users": "SENDBLUE_ALLOWED_USERS",
+                    "allow_all_users": "SENDBLUE_ALLOW_ALL_USERS",
+                    "webhook_host": "SENDBLUE_WEBHOOK_HOST",
+                    "webhook_path": "SENDBLUE_WEBHOOK_PATH",
+                    "webhook_secret": "SENDBLUE_WEBHOOK_SECRET",
+                    "webhook_secret_header": "SENDBLUE_WEBHOOK_SECRET_HEADER",
+                    "status_callback_url": "SENDBLUE_STATUS_CALLBACK_URL",
+                }
+                values = {
+                    "api_key": sendblue_cfg.get("api_key"),
+                    "api_secret": sendblue_extra.get("api_secret"),
+                    "from_number": sendblue_extra.get("from_number"),
+                    "allowed_users": sendblue_extra.get("allowed_users"),
+                    "allow_all_users": sendblue_extra.get("allow_all_users"),
+                    "webhook_host": sendblue_extra.get("webhook_host"),
+                    "webhook_path": sendblue_extra.get("webhook_path"),
+                    "webhook_secret": sendblue_extra.get("webhook_secret"),
+                    "webhook_secret_header": sendblue_extra.get("webhook_secret_header"),
+                    "status_callback_url": sendblue_extra.get("status_callback_url"),
+                }
+                for key, env_name in sendblue_env_map.items():
+                    value = values.get(key)
+                    if value not in (None, "") and not os.getenv(env_name):
+                        os.environ[env_name] = str(value)
+                if "webhook_port" in sendblue_extra and not os.getenv("SENDBLUE_WEBHOOK_PORT"):
+                    os.environ["SENDBLUE_WEBHOOK_PORT"] = str(sendblue_extra["webhook_port"])
+                if "auto_mark_read" in sendblue_extra and not os.getenv("SENDBLUE_AUTO_MARK_READ"):
+                    value = sendblue_extra.get("auto_mark_read")
+                    os.environ["SENDBLUE_AUTO_MARK_READ"] = str(value).lower() if isinstance(value, bool) else str(value)
+                sendblue_home = sendblue_cfg.get("home_channel")
+                if isinstance(sendblue_home, dict):
+                    if sendblue_home.get("chat_id") not in (None, "") and not os.getenv("SENDBLUE_HOME_CHANNEL"):
+                        os.environ["SENDBLUE_HOME_CHANNEL"] = str(sendblue_home["chat_id"])
+                    if sendblue_home.get("name") not in (None, "") and not os.getenv("SENDBLUE_HOME_CHANNEL_NAME"):
+                        os.environ["SENDBLUE_HOME_CHANNEL_NAME"] = str(sendblue_home["name"])
+
             for plat in Platform:
                 if plat == Platform.LOCAL:
                     continue
@@ -801,6 +851,47 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=sms_home,
             name=os.getenv("SMS_HOME_CHANNEL_NAME", "Home"),
         )
+
+    # Sendblue
+    sendblue_key = os.getenv("SENDBLUE_API_KEY")
+    sendblue_secret = os.getenv("SENDBLUE_API_SECRET")
+    sendblue_from = os.getenv("SENDBLUE_FROM_NUMBER")
+    if all([sendblue_key, sendblue_secret, sendblue_from]):
+        if Platform.SENDBLUE not in config.platforms:
+            config.platforms[Platform.SENDBLUE] = PlatformConfig()
+        sendblue_cfg = config.platforms[Platform.SENDBLUE]
+        sendblue_cfg.enabled = True
+        sendblue_cfg.api_key = sendblue_key
+        sendblue_cfg.extra.update({
+            "api_secret": sendblue_secret,
+            "from_number": sendblue_from,
+        })
+        for env_name, extra_key in (
+            ("SENDBLUE_WEBHOOK_HOST", "webhook_host"),
+            ("SENDBLUE_WEBHOOK_PATH", "webhook_path"),
+            ("SENDBLUE_WEBHOOK_SECRET", "webhook_secret"),
+            ("SENDBLUE_WEBHOOK_SECRET_HEADER", "webhook_secret_header"),
+            ("SENDBLUE_STATUS_CALLBACK_URL", "status_callback_url"),
+        ):
+            value = os.getenv(env_name)
+            if value:
+                sendblue_cfg.extra[extra_key] = value
+        sendblue_port = os.getenv("SENDBLUE_WEBHOOK_PORT")
+        if sendblue_port:
+            try:
+                sendblue_cfg.extra["webhook_port"] = int(sendblue_port)
+            except ValueError:
+                pass
+        auto_mark_read = os.getenv("SENDBLUE_AUTO_MARK_READ")
+        if auto_mark_read:
+            sendblue_cfg.extra["auto_mark_read"] = auto_mark_read.lower() in ("true", "1", "yes", "on")
+        sendblue_home = os.getenv("SENDBLUE_HOME_CHANNEL")
+        if sendblue_home:
+            sendblue_cfg.home_channel = HomeChannel(
+                platform=Platform.SENDBLUE,
+                chat_id=sendblue_home,
+                name=os.getenv("SENDBLUE_HOME_CHANNEL_NAME", "Home"),
+            )
 
     # API Server
     api_server_enabled = os.getenv("API_SERVER_ENABLED", "").lower() in ("true", "1", "yes")

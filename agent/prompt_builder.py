@@ -263,6 +263,13 @@ PLATFORM_HINTS = {
         "only — no markdown, no formatting. SMS messages are limited to ~1600 "
         "characters, so be brief and direct."
     ),
+    "sendblue": (
+        "You are communicating via Sendblue (iMessage/SMS/RCS). Use plain text only — "
+        "strip markdown and formatting because Sendblue conversations should read like "
+        "normal messages. You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "in your response, or include image URLs in markdown format ![alt](url) and they will be "
+        "sent as media attachments."
+    ),
 }
 
 CONTEXT_FILE_MAX_CHARS = 20_000

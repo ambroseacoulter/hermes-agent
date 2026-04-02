@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from hermes_cli.tools_config import (
     _configure_provider,
+    _get_enabled_platforms,
     _get_platform_tools,
     _platform_toolset_summary,
     _save_platform_tools,
@@ -246,7 +247,6 @@ def test_save_platform_tools_still_preserves_mcp_with_platform_default_present()
     # Deselected configurable toolset removed
     assert "terminal" not in saved
 
-
 def test_visible_providers_include_nous_subscription_when_logged_in(monkeypatch):
     monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "1")
     config = {"model": {"provider": "nous"}}
@@ -332,6 +332,25 @@ def test_first_install_nous_auto_configures_managed_defaults(monkeypatch):
     assert config["tts"]["provider"] == "openai"
     assert config["browser"]["cloud_provider"] == "browserbase"
     assert configured == []
+
+
+def test_get_enabled_platforms_includes_sendblue_from_config_yaml(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        """platforms:
+  sendblue:
+    enabled: true
+    api_key: key
+    extra:
+      api_secret: secret
+      from_number: '+15551234567'
+""",
+        encoding="utf-8",
+    )
+
+    enabled = _get_enabled_platforms()
+
+    assert "sendblue" in enabled
 
 # ── Platform / toolset consistency ────────────────────────────────────────────
 

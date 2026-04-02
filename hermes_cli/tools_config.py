@@ -142,6 +142,7 @@ PLATFORMS = {
     "slack":    {"label": "💼 Slack",      "default_toolset": "hermes-slack"},
     "whatsapp": {"label": "📱 WhatsApp",   "default_toolset": "hermes-whatsapp"},
     "signal":   {"label": "📡 Signal",     "default_toolset": "hermes-signal"},
+    "sendblue": {"label": "💙 Sendblue",   "default_toolset": "hermes-sendblue"},
     "homeassistant": {"label": "🏠 Home Assistant", "default_toolset": "hermes-homeassistant"},
     "email":    {"label": "📧 Email",      "default_toolset": "hermes-email"},
     "matrix":   {"label": "💬 Matrix",     "default_toolset": "hermes-matrix"},
@@ -445,14 +446,44 @@ def _run_post_setup(post_setup_key: str):
 def _get_enabled_platforms() -> List[str]:
     """Return platform keys that are configured (have tokens or are CLI)."""
     enabled = ["cli"]
-    if get_env_value("TELEGRAM_BOT_TOKEN"):
+    config = load_config()
+    platforms_cfg = config.get("platforms", {})
+    if not isinstance(platforms_cfg, dict):
+        platforms_cfg = {}
+
+    if get_env_value("TELEGRAM_BOT_TOKEN") or bool((platforms_cfg.get("telegram") or {}).get("token")):
         enabled.append("telegram")
-    if get_env_value("DISCORD_BOT_TOKEN"):
+    if get_env_value("DISCORD_BOT_TOKEN") or bool((platforms_cfg.get("discord") or {}).get("token")):
         enabled.append("discord")
-    if get_env_value("SLACK_BOT_TOKEN"):
+    if get_env_value("SLACK_BOT_TOKEN") or bool((platforms_cfg.get("slack") or {}).get("token")):
         enabled.append("slack")
-    if get_env_value("WHATSAPP_ENABLED"):
+
+    whatsapp_cfg = platforms_cfg.get("whatsapp", {})
+    if not isinstance(whatsapp_cfg, dict):
+        whatsapp_cfg = {}
+    if get_env_value("WHATSAPP_ENABLED") or whatsapp_cfg.get("enabled"):
         enabled.append("whatsapp")
+
+    sendblue_cfg = platforms_cfg.get("sendblue", {})
+    if not isinstance(sendblue_cfg, dict):
+        sendblue_cfg = {}
+    sendblue_extra = sendblue_cfg.get("extra", {})
+    if not isinstance(sendblue_extra, dict):
+        sendblue_extra = {}
+    if (
+        all([
+            get_env_value("SENDBLUE_API_KEY"),
+            get_env_value("SENDBLUE_API_SECRET"),
+            get_env_value("SENDBLUE_FROM_NUMBER"),
+        ])
+        or (
+            sendblue_cfg.get("enabled")
+            and sendblue_cfg.get("api_key")
+            and sendblue_extra.get("api_secret")
+            and sendblue_extra.get("from_number")
+        )
+    ):
+        enabled.append("sendblue")
     return enabled
 
 

@@ -191,6 +191,20 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `SMS_ALLOW_ALL_USERS` | Allow all SMS senders without an allowlist |
 | `SMS_HOME_CHANNEL` | Phone number for cron job / notification delivery |
 | `SMS_HOME_CHANNEL_NAME` | Display name for the SMS home channel |
+| `SENDBLUE_API_KEY` | Sendblue API key |
+| `SENDBLUE_API_SECRET` | Sendblue API secret |
+| `SENDBLUE_FROM_NUMBER` | Sendblue line number Hermes sends from (E.164 format) |
+| `SENDBLUE_ALLOWED_USERS` | Comma-separated E.164 phone numbers allowed to chat |
+| `SENDBLUE_ALLOW_ALL_USERS` | Allow all Sendblue users without an allowlist |
+| `SENDBLUE_HOME_CHANNEL` | Default Sendblue phone number or `group_id` for cron delivery |
+| `SENDBLUE_HOME_CHANNEL_NAME` | Display name for the Sendblue home target |
+| `SENDBLUE_WEBHOOK_HOST` | Bind address for the Sendblue webhook listener (default: `0.0.0.0`) |
+| `SENDBLUE_WEBHOOK_PORT` | Port for inbound Sendblue webhooks (default: `8645`) |
+| `SENDBLUE_WEBHOOK_PATH` | HTTP path for inbound Sendblue webhooks (default: `/webhooks/sendblue`) |
+| `SENDBLUE_WEBHOOK_SECRET` | Optional shared secret Hermes expects on inbound Sendblue webhooks; leave unset to disable secret validation |
+| `SENDBLUE_WEBHOOK_SECRET_HEADER` | Header name containing the Sendblue webhook secret (default: `sb-signing-secret`) |
+| `SENDBLUE_AUTO_MARK_READ` | Automatically mark inbound iMessage DMs as read (`true`/`false`, default: `true`) |
+| `SENDBLUE_STATUS_CALLBACK_URL` | Optional per-message status callback URL for direct Sendblue sends |
 | `EMAIL_ADDRESS` | Email address for the Email gateway adapter |
 | `EMAIL_PASSWORD` | Password or app password for the email account |
 | `EMAIL_IMAP_HOST` | IMAP hostname for the email adapter |

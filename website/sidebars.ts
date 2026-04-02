@@ -98,6 +98,7 @@ const sidebars: SidebarsConfig = {
         'user-guide/messaging/slack',
         'user-guide/messaging/whatsapp',
         'user-guide/messaging/signal',
+        'user-guide/messaging/sendblue',
         'user-guide/messaging/email',
         'user-guide/messaging/sms',
         'user-guide/messaging/homeassistant',

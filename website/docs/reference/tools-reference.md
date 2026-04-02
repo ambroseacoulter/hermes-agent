@@ -93,6 +93,12 @@ This page documents the built-in Hermes tool registry as it exists in code. Avai
 |------|-------------|----------------------|
 | `send_message` | Send a message to a connected messaging platform, or list available targets. IMPORTANT: When the user asks to send to a specific channel or person (not just a bare platform name), call send_message(action='list') FIRST to see available tar… | — |
 
+## `sendblue` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `sendblue_action` | Send Sendblue-specific conversation actions in the current Sendblue chat. Useful for iMessage tapback reactions and manual read receipts. | — |
+
 ## `moa` toolset
 
 | Tool | Description | Requires environment |

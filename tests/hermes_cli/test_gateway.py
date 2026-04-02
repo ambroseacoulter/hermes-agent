@@ -252,3 +252,60 @@ class TestWaitForGatewayExit:
 
         # Should not raise — ProcessLookupError means it's already gone.
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=2.0)
+
+
+def test_sync_sendblue_config_yaml_persists_platform_and_toolset(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+    monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+    monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+    monkeypatch.setenv("SENDBLUE_ALLOWED_USERS", "+15557654321")
+    monkeypatch.setenv("SENDBLUE_HOME_CHANNEL", "+15557654321")
+
+    gateway._sync_sendblue_config_yaml()
+
+    import yaml
+
+    saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    sendblue_cfg = saved["platforms"]["sendblue"]
+
+    assert sendblue_cfg["enabled"] is True
+    assert sendblue_cfg["api_key"] == "key"
+    assert sendblue_cfg["extra"]["api_secret"] == "secret"
+    assert sendblue_cfg["extra"]["from_number"] == "+15551234567"
+    assert sendblue_cfg["extra"]["allowed_users"] == "+15557654321"
+    assert sendblue_cfg["home_channel"]["chat_id"] == "+15557654321"
+    assert saved["platform_toolsets"]["sendblue"] == ["hermes-sendblue"]
+
+
+def test_sendblue_setup_flow_includes_webhook_secret_defaults():
+    sendblue = next(platform for platform in gateway._PLATFORMS if platform["key"] == "sendblue")
+    vars_by_name = {var["name"]: var for var in sendblue["vars"]}
+
+    assert "SENDBLUE_WEBHOOK_SECRET" in vars_by_name
+    assert vars_by_name["SENDBLUE_WEBHOOK_SECRET_HEADER"]["default"] == "sb-signing-secret"
+
+
+def test_sendblue_setup_flow_accepts_default_secret_header(monkeypatch):
+    sendblue = next(platform for platform in gateway._PLATFORMS if platform["key"] == "sendblue")
+    saved = {}
+    prompt_calls = []
+    answers = iter(["key", "secret", "+15551234567", "", "", "", "", ""])
+
+    def fake_prompt(message, default=None, password=False):
+        prompt_calls.append((message, default, password))
+        return next(answers) or default or ""
+
+    monkeypatch.setattr(gateway, "prompt", fake_prompt)
+    monkeypatch.setattr(gateway, "prompt_choice", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(gateway, "get_env_value", lambda key: None)
+    monkeypatch.setattr(gateway, "save_env_value", lambda key, value: saved.__setitem__(key, value))
+    monkeypatch.setattr(gateway, "_sync_sendblue_config_yaml", lambda: None)
+    monkeypatch.setattr(gateway, "_yaml_platform_config", lambda key: {})
+
+    gateway._setup_standard_platform(sendblue)
+
+    header_prompt = next(call for call in prompt_calls if "Webhook secret header name" in call[0])
+    assert header_prompt[1] == "sb-signing-secret"
+    assert saved["SENDBLUE_WEBHOOK_SECRET_HEADER"] == "sb-signing-secret"
+    assert "SENDBLUE_WEBHOOK_SECRET" not in saved
