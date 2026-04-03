@@ -369,6 +369,14 @@ class SessionEntry:
     # survives gateway restarts (the old in-memory _pre_flushed_sessions
     # set was lost on restart, causing redundant re-flushes).
     memory_flushed: bool = False
+
+    # Latest profile autonomy revision this session has seen via hidden
+    # injection or proactive home-channel delivery.
+    last_autonomy_revision_seen: int = 0
+
+    # Timestamp of the last proactive autonomy message delivered into this
+    # visible session transcript.
+    last_autonomy_push_at: Optional[datetime] = None
     
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -388,6 +396,8 @@ class SessionEntry:
             "estimated_cost_usd": self.estimated_cost_usd,
             "cost_status": self.cost_status,
             "memory_flushed": self.memory_flushed,
+            "last_autonomy_revision_seen": self.last_autonomy_revision_seen,
+            "last_autonomy_push_at": self.last_autonomy_push_at.isoformat() if self.last_autonomy_push_at else None,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -424,6 +434,11 @@ class SessionEntry:
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
             cost_status=data.get("cost_status", "unknown"),
             memory_flushed=data.get("memory_flushed", False),
+            last_autonomy_revision_seen=int(data.get("last_autonomy_revision_seen", 0) or 0),
+            last_autonomy_push_at=(
+                datetime.fromisoformat(data["last_autonomy_push_at"])
+                if data.get("last_autonomy_push_at") else None
+            ),
         )
 
 
@@ -803,6 +818,39 @@ class SessionStore:
                 )
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
+
+    def mark_autonomy_revision_seen(self, session_key: str, revision: int) -> None:
+        """Record the latest autonomy revision consumed by a session."""
+        revision = int(revision or 0)
+        if revision <= 0:
+            return
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if not entry:
+                return
+            if revision <= entry.last_autonomy_revision_seen:
+                return
+            entry.last_autonomy_revision_seen = revision
+            self._save()
+
+    def mark_autonomy_push(
+        self,
+        session_key: str,
+        *,
+        pushed_at: Optional[datetime] = None,
+        revision: Optional[int] = None,
+    ) -> None:
+        """Record a proactive autonomy delivery against a session."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if not entry:
+                return
+            entry.last_autonomy_push_at = pushed_at or _now()
+            if revision is not None and revision > entry.last_autonomy_revision_seen:
+                entry.last_autonomy_revision_seen = int(revision)
+            self._save()
 
     def reset_session(self, session_key: str) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""

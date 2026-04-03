@@ -16,6 +16,152 @@ def db(tmp_path):
     session_db.close()
 
 
+class TestAutonomyState:
+    def test_watch_item_roundtrip_and_due_listing(self, db):
+        created = db.upsert_autonomy_watch_item(
+            normalized_key="topic:test:abc",
+            title="Track test topic",
+            kind="topic",
+            description="keep an eye on it",
+            importance="high",
+            next_check_at=time.time() - 10,
+            metadata={"source": "unit-test"},
+        )
+
+        assert created["changed"] is True
+
+        items = db.list_due_autonomy_watch_items(limit=10)
+        assert len(items) == 1
+        assert items[0]["normalized_key"] == "topic:test:abc"
+        assert items[0]["metadata"] == {"source": "unit-test"}
+
+    def test_findings_artifacts_and_inbox_counts(self, db):
+        run_id = db.create_autonomy_run("supervisor", session_key="chat:1", session_id="sid-1")
+        watch = db.upsert_autonomy_watch_item(
+            normalized_key="project:launch:abc",
+            title="Project launch",
+            kind="project",
+        )
+
+        finding = db.add_autonomy_finding(
+            run_id=run_id,
+            watch_item_id=watch["id"],
+            kind="observation",
+            title="Launch date changed",
+            summary="The launch slipped by one week",
+            details={"source": "docs"},
+            importance="high",
+            category="utility",
+            message_preview="Launch moved by one week.",
+        )
+        artifact = db.add_autonomy_artifact(
+            run_id=run_id,
+            watch_item_id=watch["id"],
+            artifact_type="draft_email",
+            title="Draft stakeholder update",
+            summary="Prepared a draft email",
+            payload={"body": "Hello"},
+            target={"to": ["team@example.com"]},
+            execution_requirements={"approval_required": True},
+            approval_required=True,
+            message_preview="I drafted an update email for the team.",
+        )
+
+        db.upsert_autonomy_inbox_item(
+            source_type="finding",
+            source_id=finding["id"],
+            title="Launch date changed",
+            message_preview="Launch moved by one week.",
+            importance="high",
+        )
+        inbox = db.upsert_autonomy_inbox_item(
+            source_type="artifact",
+            source_id=artifact["id"],
+            title="Draft stakeholder update",
+            message_preview="I drafted an update email for the team.",
+            importance="normal",
+            approval_required=True,
+        )
+
+        counts = db.get_autonomy_status_counts()
+        assert counts["pending_inbox"] == 2
+        assert counts["active_watch_items"] == 1
+        assert counts["draft_artifacts"] == 1
+
+        artifacts = db.list_autonomy_artifacts(statuses=["draft"])
+        assert artifacts[0]["payload"] == {"body": "Hello"}
+        assert artifacts[0]["target"] == {"to": ["team@example.com"]}
+
+        db.mark_autonomy_inbox_items_seen([inbox["id"]])
+        seen_items = db.list_autonomy_inbox_items(statuses=["seen"])
+        assert any(item["id"] == inbox["id"] for item in seen_items)
+
+    def test_prune_resolved_autonomy_removes_linked_records(self, db):
+        old_ts = time.time() - (90 * 86400)
+        watch = db.upsert_autonomy_watch_item(
+            normalized_key="topic:resolved:abc",
+            title="Resolved topic",
+            kind="topic",
+            status="resolved",
+        )
+        db.update_autonomy_watch_item(
+            "topic:resolved:abc",
+            status="resolved",
+            last_checked_at=old_ts,
+        )
+        db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE autonomy_watch_items SET last_changed_at = ? WHERE normalized_key = ?",
+                (old_ts, "topic:resolved:abc"),
+            )
+        )
+        finding = db.add_autonomy_finding(
+            run_id=None,
+            watch_item_id=watch["id"],
+            kind="observation",
+            title="Old finding",
+            summary="Done",
+        )
+        artifact = db.add_autonomy_artifact(
+            run_id=None,
+            watch_item_id=watch["id"],
+            artifact_type="draft_email",
+            title="Old artifact",
+            summary="Done",
+        )
+        inbox_finding = db.upsert_autonomy_inbox_item(
+            source_type="finding",
+            source_id=finding["id"],
+            title="Old finding",
+            message_preview="Done",
+        )
+        inbox_artifact = db.upsert_autonomy_inbox_item(
+            source_type="artifact",
+            source_id=artifact["id"],
+            title="Old artifact",
+            message_preview="Done",
+        )
+        db.record_autonomy_delivery_attempt(
+            inbox_item_id=inbox_finding["id"],
+            mode="proactive",
+            status="sent",
+        )
+        db.record_autonomy_delivery_attempt(
+            inbox_item_id=inbox_artifact["id"],
+            mode="proactive",
+            status="sent",
+        )
+
+        counts = db.prune_autonomy_resolved(older_than_ts=time.time() - (30 * 86400))
+
+        assert counts["watch_items"] == 1
+        assert counts["findings"] == 1
+        assert counts["artifacts"] == 1
+        assert counts["inbox_items"] == 2
+        assert counts["delivery_attempts"] == 2
+        assert db.list_autonomy_watch_items(statuses=["resolved"]) == []
+
+
 # =========================================================================
 # Session lifecycle
 # =========================================================================
@@ -822,7 +968,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 6
+        assert version == 7
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -878,12 +1024,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v6
+        # Open with SessionDB — should migrate to the current schema version
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 6
+        assert cursor.fetchone()[0] == 7
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -894,6 +1040,101 @@ class TestSchemaInit:
         assert migrated_db.set_session_title("existing", "Migrated Title") is True
         session = migrated_db.get_session("existing")
         assert session["title"] == "Migrated Title"
+
+        migrated_db.close()
+
+    def test_repairs_legacy_autonomy_tables_even_when_schema_version_is_current(self, tmp_path):
+        """Legacy prototype autonomy tables should be repaired on startup.
+
+        Some earlier branches created autonomy_runs without the final run_type
+        and payload columns, but also stamped the DB as current. Startup should
+        still heal that table shape.
+        """
+        import sqlite3
+
+        db_path = tmp_path / "legacy_autonomy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (7);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT
+            );
+
+            CREATE TABLE autonomy_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                current_revision INTEGER NOT NULL DEFAULT 0,
+                paused INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE autonomy_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_key TEXT NOT NULL,
+                session_id TEXT,
+                run_session_id TEXT,
+                status TEXT NOT NULL,
+                summary TEXT,
+                created_at REAL NOT NULL,
+                finished_at REAL,
+                error TEXT
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        migrated_db = SessionDB(db_path=db_path)
+
+        columns = {
+            row[1]
+            for row in migrated_db._conn.execute("PRAGMA table_info(autonomy_runs)").fetchall()
+        }
+        assert "run_type" in columns
+        assert "payload" in columns
+
+        run_id = migrated_db.create_autonomy_run("intake", session_key="chat:1", session_id="s1")
+        assert isinstance(run_id, int)
 
         migrated_db.close()
 

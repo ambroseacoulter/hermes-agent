@@ -4,6 +4,7 @@ import os
 from unittest.mock import patch
 
 from gateway.config import (
+    AutonomyConfig,
     GatewayConfig,
     HomeChannel,
     Platform,
@@ -119,6 +120,31 @@ class TestGatewayConfigRoundtrip:
         assert restored.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
         assert restored.group_sessions_per_user is False
 
+    def test_roundtrip_preserves_autonomy_config(self):
+        config = GatewayConfig(
+            autonomy=AutonomyConfig(
+                enabled=True,
+                interval_seconds=900,
+                home_platform="telegram",
+                home_chat_id="123",
+                home_thread_id="77",
+                extract_behavior="hermes",
+                proactivity_level="both",
+                resolved_retention_days=14,
+            )
+        )
+
+        restored = GatewayConfig.from_dict(config.to_dict())
+
+        assert restored.autonomy.enabled is True
+        assert restored.autonomy.interval_seconds == 900
+        assert restored.autonomy.home_platform == "telegram"
+        assert restored.autonomy.home_chat_id == "123"
+        assert restored.autonomy.home_thread_id == "77"
+        assert restored.autonomy.extract_behavior == "hermes"
+        assert restored.autonomy.proactivity_level == "both"
+        assert restored.autonomy.resolved_retention_days == 14
+
     def test_roundtrip_preserves_unauthorized_dm_behavior(self):
         config = GatewayConfig(
             unauthorized_dm_behavior="ignore",
@@ -196,6 +222,62 @@ class TestLoadGatewayConfig:
 
         assert config.unauthorized_dm_behavior == "ignore"
         assert config.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
+
+    def test_bridges_autonomy_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "autonomy:\n"
+            "  enabled: true\n"
+            "  interval_seconds: 600\n"
+            "  home_platform: telegram\n"
+            "  home_chat_id: '12345'\n"
+            "  home_thread_id: '88'\n"
+            "  infer_level: aggressive\n"
+            "  extract_behavior: auto_extract\n"
+            "  proactivity_level: both\n"
+            "  resolved_retention_days: 10\n"
+            "  quiet_hours:\n"
+            "    enabled: true\n"
+            "    start: '21:30'\n"
+            "    end: '07:15'\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.autonomy.enabled is True
+        assert config.autonomy.interval_seconds == 600
+        assert config.autonomy.home_platform == "telegram"
+        assert config.autonomy.home_chat_id == "12345"
+        assert config.autonomy.home_thread_id == "88"
+        assert config.autonomy.infer_level == "aggressive"
+        assert config.autonomy.extract_behavior == "auto_extract"
+        assert config.autonomy.proactivity_level == "both"
+        assert config.autonomy.resolved_retention_days == 10
+        assert config.autonomy.quiet_hours_enabled is True
+        assert config.autonomy.quiet_hours_start == "21:30"
+        assert config.autonomy.quiet_hours_end == "07:15"
+
+    def test_invalid_extract_behavior_falls_back_to_both(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "autonomy:\n"
+            "  enabled: true\n"
+            "  extract_behavior: surprising-mode\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.autonomy.extract_behavior == "both"
 
 
 class TestHomeChannelEnvOverrides:

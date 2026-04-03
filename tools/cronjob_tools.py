@@ -52,6 +52,7 @@ _CRON_INVISIBLE_CHARS = {
 }
 
 
+
 def _scan_cron_prompt(prompt: str) -> str:
     """Scan a cron prompt for critical threats. Returns error string if blocked, else empty."""
     for char in _CRON_INVISIBLE_CHARS:

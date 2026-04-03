@@ -8,6 +8,27 @@ description: "Schedule automated tasks with natural language, manage them with o
 
 Schedule tasks to run automatically with natural language or cron expressions. Hermes exposes cron management through a single `cronjob` tool with action-style operations instead of separate schedule/list/remove tools.
 
+## Cron vs autonomy
+
+Cron and autonomy solve different problems:
+
+- **Cron** is for exact time-based schedules and recurring jobs.
+- **Autonomy** is for open-ended monitoring and proactive follow-up while the gateway is running.
+
+Use cron when timing is the requirement:
+
+- “Every day at 9am send me a digest.”
+- “In 45 minutes remind me to check the build.”
+- “Every 6 hours run this health check.”
+
+Use autonomy when ongoing awareness is the requirement:
+
+- “Keep an eye on OpenAI updates.”
+- “Watch this repo and tell me if anything important changes.”
+- “Let me know if this topic develops.”
+
+See [Autonomy](/docs/user-guide/features/autonomy) for the proactive background loop.
+
 ## What cron can do now
 
 Cron jobs can:
@@ -53,6 +74,10 @@ Every morning at 9am, check Hacker News for AI news and send me a summary on Tel
 ```
 
 Hermes will use the unified `cronjob` tool internally.
+
+:::tip
+If the request sounds like open-ended monitoring rather than an exact schedule, Hermes should prefer autonomy over cron when gateway autonomy is enabled.
+:::
 
 ## Skill-backed cron jobs
 

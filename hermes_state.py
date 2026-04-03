@@ -32,7 +32,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -89,6 +89,133 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS autonomy_state (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    current_revision INTEGER NOT NULL DEFAULT 0,
+    paused INTEGER NOT NULL DEFAULT 0,
+    last_supervisor_run_at REAL,
+    last_home_delivery_at REAL,
+    last_social_nudge_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_type TEXT NOT NULL,
+    session_key TEXT,
+    session_id TEXT,
+    status TEXT NOT NULL,
+    summary TEXT,
+    payload TEXT,
+    created_at REAL NOT NULL,
+    finished_at REAL,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_runs_created ON autonomy_runs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS autonomy_watch_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    normalized_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    importance TEXT NOT NULL DEFAULT 'normal',
+    source_session_key TEXT,
+    source_message_ref TEXT,
+    inference_mode TEXT NOT NULL DEFAULT 'implied',
+    due_at REAL,
+    status TEXT NOT NULL DEFAULT 'active',
+    next_check_at REAL,
+    last_checked_at REAL,
+    last_changed_at REAL NOT NULL,
+    metadata TEXT,
+    revision INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_watch_status ON autonomy_watch_items(status, next_check_at, last_changed_at DESC);
+
+CREATE TABLE IF NOT EXISTS autonomy_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    watch_item_id INTEGER,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT,
+    details TEXT,
+    importance TEXT NOT NULL DEFAULT 'normal',
+    category TEXT NOT NULL DEFAULT 'utility',
+    message_preview TEXT,
+    created_at REAL NOT NULL,
+    revision INTEGER NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES autonomy_runs(id),
+    FOREIGN KEY (watch_item_id) REFERENCES autonomy_watch_items(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_findings_created ON autonomy_findings(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS autonomy_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER,
+    watch_item_id INTEGER,
+    artifact_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT,
+    payload TEXT,
+    target TEXT,
+    execution_requirements TEXT,
+    importance TEXT NOT NULL DEFAULT 'normal',
+    category TEXT NOT NULL DEFAULT 'utility',
+    approval_required INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'draft',
+    message_preview TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    revision INTEGER NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES autonomy_runs(id),
+    FOREIGN KEY (watch_item_id) REFERENCES autonomy_watch_items(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_artifacts_status ON autonomy_artifacts(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS autonomy_inbox_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    source_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    message_preview TEXT,
+    importance TEXT NOT NULL DEFAULT 'normal',
+    category TEXT NOT NULL DEFAULT 'utility',
+    approval_required INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    seen_at REAL,
+    last_delivered_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    revision INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomy_inbox_source_unique
+ON autonomy_inbox_items(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_autonomy_inbox_status ON autonomy_inbox_items(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_autonomy_inbox_revision ON autonomy_inbox_items(revision DESC);
+
+CREATE TABLE IF NOT EXISTS autonomy_delivery_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inbox_item_id INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message_text TEXT,
+    target_platform TEXT,
+    target_chat_id TEXT,
+    target_thread_id TEXT,
+    created_at REAL NOT NULL,
+    sent_at REAL,
+    error TEXT,
+    FOREIGN KEY (inbox_item_id) REFERENCES autonomy_inbox_items(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_delivery_attempts_inbox ON autonomy_delivery_attempts(inbox_item_id, created_at DESC);
 """
 
 FTS_SQL = """
@@ -330,6 +457,141 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_state (
+                        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                        current_revision INTEGER NOT NULL DEFAULT 0,
+                        paused INTEGER NOT NULL DEFAULT 0,
+                        last_supervisor_run_at REAL,
+                        last_home_delivery_at REAL,
+                        last_social_nudge_at REAL
+                    )"""
+                )
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_type TEXT NOT NULL,
+                        session_key TEXT,
+                        session_id TEXT,
+                        status TEXT NOT NULL,
+                        summary TEXT,
+                        payload TEXT,
+                        created_at REAL NOT NULL,
+                        finished_at REAL,
+                        error TEXT
+                    )"""
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_runs_created ON autonomy_runs(created_at DESC)")
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_watch_items (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        normalized_key TEXT NOT NULL UNIQUE,
+                        kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        importance TEXT NOT NULL DEFAULT 'normal',
+                        source_session_key TEXT,
+                        source_message_ref TEXT,
+                        inference_mode TEXT NOT NULL DEFAULT 'implied',
+                        due_at REAL,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        next_check_at REAL,
+                        last_checked_at REAL,
+                        last_changed_at REAL NOT NULL,
+                        metadata TEXT,
+                        revision INTEGER NOT NULL
+                    )"""
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_watch_status ON autonomy_watch_items(status, next_check_at, last_changed_at DESC)")
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_findings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id INTEGER,
+                        watch_item_id INTEGER,
+                        kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        summary TEXT,
+                        details TEXT,
+                        importance TEXT NOT NULL DEFAULT 'normal',
+                        category TEXT NOT NULL DEFAULT 'utility',
+                        message_preview TEXT,
+                        created_at REAL NOT NULL,
+                        revision INTEGER NOT NULL,
+                        FOREIGN KEY (run_id) REFERENCES autonomy_runs(id),
+                        FOREIGN KEY (watch_item_id) REFERENCES autonomy_watch_items(id)
+                    )"""
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_findings_created ON autonomy_findings(created_at DESC)")
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_artifacts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id INTEGER,
+                        watch_item_id INTEGER,
+                        artifact_type TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        summary TEXT,
+                        payload TEXT,
+                        target TEXT,
+                        execution_requirements TEXT,
+                        importance TEXT NOT NULL DEFAULT 'normal',
+                        category TEXT NOT NULL DEFAULT 'utility',
+                        approval_required INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'draft',
+                        message_preview TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        revision INTEGER NOT NULL,
+                        FOREIGN KEY (run_id) REFERENCES autonomy_runs(id),
+                        FOREIGN KEY (watch_item_id) REFERENCES autonomy_watch_items(id)
+                    )"""
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_artifacts_status ON autonomy_artifacts(status, created_at DESC)")
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_inbox_items (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source_type TEXT NOT NULL,
+                        source_id INTEGER NOT NULL,
+                        title TEXT NOT NULL,
+                        message_preview TEXT,
+                        importance TEXT NOT NULL DEFAULT 'normal',
+                        category TEXT NOT NULL DEFAULT 'utility',
+                        approval_required INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        seen_at REAL,
+                        last_delivered_at REAL,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        revision INTEGER NOT NULL
+                    )"""
+                )
+                cursor.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomy_inbox_source_unique "
+                    "ON autonomy_inbox_items(source_type, source_id)"
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_inbox_status ON autonomy_inbox_items(status, created_at DESC)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_autonomy_inbox_revision ON autonomy_inbox_items(revision DESC)")
+                cursor.execute(
+                    """CREATE TABLE IF NOT EXISTS autonomy_delivery_attempts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        inbox_item_id INTEGER NOT NULL,
+                        mode TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        message_text TEXT,
+                        target_platform TEXT,
+                        target_chat_id TEXT,
+                        target_thread_id TEXT,
+                        created_at REAL NOT NULL,
+                        sent_at REAL,
+                        error TEXT,
+                        FOREIGN KEY (inbox_item_id) REFERENCES autonomy_inbox_items(id)
+                    )"""
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_autonomy_delivery_attempts_inbox "
+                    "ON autonomy_delivery_attempts(inbox_item_id, created_at DESC)"
+                )
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -347,7 +609,93 @@ class SessionDB:
         except sqlite3.OperationalError:
             cursor.executescript(FTS_SQL)
 
+        cursor.execute(
+            "INSERT OR IGNORE INTO autonomy_state (singleton_id, current_revision, paused) VALUES (1, 0, 0)"
+        )
+
+        self._repair_autonomy_schema(cursor)
+
         self._conn.commit()
+
+    def _repair_autonomy_schema(self, cursor: sqlite3.Cursor) -> None:
+        """Repair legacy autonomy tables that may exist with stale column sets.
+
+        Earlier prototype branches created some of the same autonomy table names
+        with different schemas. If a user keeps that SQLite file, a plain
+        CREATE TABLE IF NOT EXISTS will not fix missing columns. We therefore
+        run a lightweight column repair pass on every startup.
+        """
+        required_columns = {
+            "autonomy_runs": {
+                "run_type": "TEXT NOT NULL DEFAULT 'supervisor'",
+                "payload": "TEXT",
+            },
+            "autonomy_watch_items": {
+                "source_session_key": "TEXT",
+                "source_message_ref": "TEXT",
+                "inference_mode": "TEXT NOT NULL DEFAULT 'implied'",
+                "due_at": "REAL",
+                "next_check_at": "REAL",
+                "last_checked_at": "REAL",
+                "last_changed_at": "REAL NOT NULL DEFAULT 0",
+                "metadata": "TEXT",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "autonomy_findings": {
+                "details": "TEXT",
+                "message_preview": "TEXT",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "autonomy_artifacts": {
+                "payload": "TEXT",
+                "target": "TEXT",
+                "execution_requirements": "TEXT",
+                "approval_required": "INTEGER NOT NULL DEFAULT 0",
+                "status": "TEXT NOT NULL DEFAULT 'draft'",
+                "message_preview": "TEXT",
+                "updated_at": "REAL NOT NULL DEFAULT 0",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "autonomy_inbox_items": {
+                "message_preview": "TEXT",
+                "importance": "TEXT NOT NULL DEFAULT 'normal'",
+                "category": "TEXT NOT NULL DEFAULT 'utility'",
+                "approval_required": "INTEGER NOT NULL DEFAULT 0",
+                "status": "TEXT NOT NULL DEFAULT 'pending'",
+                "seen_at": "REAL",
+                "last_delivered_at": "REAL",
+                "updated_at": "REAL NOT NULL DEFAULT 0",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "autonomy_delivery_attempts": {
+                "message_text": "TEXT",
+                "target_platform": "TEXT",
+                "target_chat_id": "TEXT",
+                "target_thread_id": "TEXT",
+                "sent_at": "REAL",
+                "error": "TEXT",
+            },
+            "autonomy_state": {
+                "last_supervisor_run_at": "REAL",
+                "last_home_delivery_at": "REAL",
+                "last_social_nudge_at": "REAL",
+            },
+        }
+
+        for table_name, columns in required_columns.items():
+            try:
+                rows = cursor.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+            except sqlite3.OperationalError:
+                continue
+            existing = {row[1] for row in rows}
+            for column_name, column_type in columns.items():
+                if column_name in existing:
+                    continue
+                safe_table = table_name.replace('"', '""')
+                safe_column = column_name.replace('"', '""')
+                cursor.execute(
+                    f'ALTER TABLE "{safe_table}" ADD COLUMN "{safe_column}" {column_type}'
+                )
 
     def close(self):
         """Close the database connection."""
@@ -355,6 +703,658 @@ class SessionDB:
             if self._conn:
                 self._conn.close()
                 self._conn = None
+
+    # =========================================================================
+    # Autonomy state
+    # =========================================================================
+
+    def _next_autonomy_revision(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT current_revision FROM autonomy_state WHERE singleton_id = 1"
+        ).fetchone()
+        current = int(row["current_revision"]) if row and row["current_revision"] is not None else 0
+        new_revision = current + 1
+        conn.execute(
+            "UPDATE autonomy_state SET current_revision = ? WHERE singleton_id = 1",
+            (new_revision,),
+        )
+        return new_revision
+
+    def get_autonomy_state(self) -> Dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM autonomy_state WHERE singleton_id = 1"
+            ).fetchone()
+        return dict(row) if row else {
+            "singleton_id": 1,
+            "current_revision": 0,
+            "paused": 0,
+            "last_supervisor_run_at": None,
+            "last_home_delivery_at": None,
+            "last_social_nudge_at": None,
+        }
+
+    def set_autonomy_paused(self, paused: bool) -> None:
+        def _do(conn):
+            conn.execute(
+                "UPDATE autonomy_state SET paused = ? WHERE singleton_id = 1",
+                (1 if paused else 0,),
+            )
+        self._execute_write(_do)
+
+    def mark_autonomy_supervisor_run(self, ran_at: Optional[float] = None) -> None:
+        ran_at = ran_at or time.time()
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE autonomy_state SET last_supervisor_run_at = ? WHERE singleton_id = 1",
+                (ran_at,),
+            )
+        self._execute_write(_do)
+
+    def mark_autonomy_delivery(self, *, social: bool = False, delivered_at: Optional[float] = None) -> None:
+        delivered_at = delivered_at or time.time()
+
+        def _do(conn):
+            if social:
+                conn.execute(
+                    "UPDATE autonomy_state SET last_home_delivery_at = ?, last_social_nudge_at = ? WHERE singleton_id = 1",
+                    (delivered_at, delivered_at),
+                )
+            else:
+                conn.execute(
+                    "UPDATE autonomy_state SET last_home_delivery_at = ? WHERE singleton_id = 1",
+                    (delivered_at,),
+                )
+        self._execute_write(_do)
+
+    def create_autonomy_run(
+        self,
+        run_type: str,
+        *,
+        session_key: str = None,
+        session_id: str = None,
+        status: str = "running",
+        summary: str = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> int:
+        payload_json = json.dumps(payload or {})
+
+        def _do(conn):
+            cursor = conn.execute(
+                """INSERT INTO autonomy_runs
+                   (run_type, session_key, session_id, status, summary, payload, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (run_type, session_key, session_id, status, summary, payload_json, time.time()),
+            )
+            return cursor.lastrowid
+
+        return self._execute_write(_do)
+
+    def finish_autonomy_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        summary: str = None,
+        error: str = None,
+        payload: Dict[str, Any] | None = None,
+    ) -> None:
+        payload_json = json.dumps(payload or {})
+
+        def _do(conn):
+            conn.execute(
+                """UPDATE autonomy_runs
+                   SET status = ?, summary = COALESCE(?, summary), error = ?, payload = ?, finished_at = ?
+                   WHERE id = ?""",
+                (status, summary, error, payload_json, time.time(), run_id),
+            )
+
+        self._execute_write(_do)
+
+    def upsert_autonomy_watch_item(
+        self,
+        *,
+        normalized_key: str,
+        title: str,
+        kind: str,
+        description: str = "",
+        importance: str = "normal",
+        source_session_key: str = None,
+        source_message_ref: str = None,
+        inference_mode: str = "implied",
+        due_at: Optional[float] = None,
+        next_check_at: Optional[float] = None,
+        metadata: Dict[str, Any] | None = None,
+        status: str = "active",
+    ) -> Dict[str, Any]:
+        now_ts = time.time()
+        metadata_json = json.dumps(metadata or {})
+
+        def _do(conn):
+            existing = conn.execute(
+                """SELECT id, title, kind, description, importance, source_session_key,
+                          source_message_ref, inference_mode, due_at, status, next_check_at, metadata, revision
+                   FROM autonomy_watch_items WHERE normalized_key = ?""",
+                (normalized_key,),
+            ).fetchone()
+            if existing:
+                changed = any([
+                    existing["title"] != title,
+                    existing["kind"] != kind,
+                    (existing["description"] or "") != (description or ""),
+                    (existing["importance"] or "normal") != importance,
+                    (existing["source_session_key"] or "") != (source_session_key or ""),
+                    (existing["source_message_ref"] or "") != (source_message_ref or ""),
+                    (existing["inference_mode"] or "implied") != inference_mode,
+                    existing["due_at"] != due_at,
+                    (existing["status"] or "active") != status,
+                    existing["next_check_at"] != next_check_at,
+                    (existing["metadata"] or "{}") != metadata_json,
+                ])
+                if not changed:
+                    return {"id": existing["id"], "revision": existing["revision"], "changed": False}
+                revision = self._next_autonomy_revision(conn)
+                conn.execute(
+                    """UPDATE autonomy_watch_items
+                       SET title = ?, kind = ?, description = ?, importance = ?, source_session_key = ?,
+                           source_message_ref = ?, inference_mode = ?, due_at = ?, status = ?, next_check_at = ?,
+                           last_changed_at = ?, metadata = ?, revision = ?
+                       WHERE normalized_key = ?""",
+                    (
+                        title, kind, description, importance, source_session_key, source_message_ref,
+                        inference_mode, due_at, status, next_check_at, now_ts, metadata_json, revision, normalized_key,
+                    ),
+                )
+                return {"id": existing["id"], "revision": revision, "changed": True}
+
+            revision = self._next_autonomy_revision(conn)
+            cursor = conn.execute(
+                """INSERT INTO autonomy_watch_items
+                   (normalized_key, kind, title, description, importance, source_session_key,
+                    source_message_ref, inference_mode, due_at, status, next_check_at,
+                    last_changed_at, metadata, revision)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    normalized_key, kind, title, description, importance, source_session_key,
+                    source_message_ref, inference_mode, due_at, status, next_check_at,
+                    now_ts, metadata_json, revision,
+                ),
+            )
+            return {"id": cursor.lastrowid, "revision": revision, "changed": True}
+
+        return self._execute_write(_do)
+
+    def update_autonomy_watch_item(
+        self,
+        normalized_key: str,
+        *,
+        status: Optional[str] = None,
+        next_check_at: Optional[float] = None,
+        description: Optional[str] = None,
+        importance: Optional[str] = None,
+        last_checked_at: Optional[float] = None,
+    ) -> None:
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT id FROM autonomy_watch_items WHERE normalized_key = ?",
+                (normalized_key,),
+            ).fetchone()
+            if not existing:
+                return
+            assignments = []
+            params: list[Any] = []
+            if status is not None:
+                assignments.append("status = ?")
+                params.append(status)
+            if next_check_at is not None:
+                assignments.append("next_check_at = ?")
+                params.append(next_check_at)
+            if description is not None:
+                assignments.append("description = ?")
+                params.append(description)
+            if importance is not None:
+                assignments.append("importance = ?")
+                params.append(importance)
+            if last_checked_at is not None:
+                assignments.append("last_checked_at = ?")
+                params.append(last_checked_at)
+            if not assignments:
+                return
+            revision = self._next_autonomy_revision(conn)
+            assignments.extend(["last_changed_at = ?", "revision = ?"])
+            params.extend([time.time(), revision, normalized_key])
+            conn.execute(
+                f"UPDATE autonomy_watch_items SET {', '.join(assignments)} WHERE normalized_key = ?",
+                tuple(params),
+            )
+
+        self._execute_write(_do)
+
+    def list_autonomy_watch_items(self, *, statuses: Optional[List[str]] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        query = (
+            "SELECT id, normalized_key, kind, title, description, importance, source_session_key, "
+            "source_message_ref, inference_mode, due_at, status, next_check_at, last_checked_at, "
+            "last_changed_at, metadata, revision "
+            "FROM autonomy_watch_items"
+        )
+        params: list[Any] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" WHERE status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY importance DESC, last_changed_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            try:
+                item["metadata"] = json.loads(item.get("metadata") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["metadata"] = {}
+        return items
+
+    def list_due_autonomy_watch_items(self, *, now_ts: Optional[float] = None, limit: int = 20) -> List[Dict[str, Any]]:
+        now_ts = now_ts or time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, normalized_key, kind, title, description, importance, source_session_key,
+                          source_message_ref, inference_mode, due_at, status, next_check_at, last_checked_at,
+                          last_changed_at, metadata, revision
+                   FROM autonomy_watch_items
+                   WHERE status = 'active' AND (next_check_at IS NULL OR next_check_at <= ?)
+                   ORDER BY COALESCE(next_check_at, 0) ASC, last_changed_at DESC
+                   LIMIT ?""",
+                (now_ts, limit),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            try:
+                item["metadata"] = json.loads(item.get("metadata") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["metadata"] = {}
+        return items
+
+    def prune_autonomy_resolved(self, *, older_than_ts: float) -> Dict[str, int]:
+        """Delete resolved autonomy records older than the retention cutoff."""
+        cutoff = float(older_than_ts)
+
+        def _do(conn):
+            watch_rows = conn.execute(
+                """SELECT id FROM autonomy_watch_items
+                   WHERE status = 'resolved' AND last_changed_at < ?""",
+                (cutoff,),
+            ).fetchall()
+            watch_ids = [int(row["id"]) for row in watch_rows]
+            if not watch_ids:
+                return {
+                    "watch_items": 0,
+                    "findings": 0,
+                    "artifacts": 0,
+                    "inbox_items": 0,
+                    "delivery_attempts": 0,
+                }
+
+            watch_placeholders = ",".join("?" for _ in watch_ids)
+            finding_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    f"SELECT id FROM autonomy_findings WHERE watch_item_id IN ({watch_placeholders})",
+                    tuple(watch_ids),
+                ).fetchall()
+            ]
+            artifact_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    f"SELECT id FROM autonomy_artifacts WHERE watch_item_id IN ({watch_placeholders})",
+                    tuple(watch_ids),
+                ).fetchall()
+            ]
+
+            inbox_ids: list[int] = []
+            if finding_ids:
+                finding_placeholders = ",".join("?" for _ in finding_ids)
+                inbox_ids.extend(
+                    int(row["id"])
+                    for row in conn.execute(
+                        f"""SELECT id FROM autonomy_inbox_items
+                            WHERE source_type = 'finding' AND source_id IN ({finding_placeholders})""",
+                        tuple(finding_ids),
+                    ).fetchall()
+                )
+            if artifact_ids:
+                artifact_placeholders = ",".join("?" for _ in artifact_ids)
+                inbox_ids.extend(
+                    int(row["id"])
+                    for row in conn.execute(
+                        f"""SELECT id FROM autonomy_inbox_items
+                            WHERE source_type = 'artifact' AND source_id IN ({artifact_placeholders})""",
+                        tuple(artifact_ids),
+                    ).fetchall()
+                )
+
+            delivery_count = 0
+            if inbox_ids:
+                inbox_placeholders = ",".join("?" for _ in inbox_ids)
+                delivery_count = conn.execute(
+                    f"DELETE FROM autonomy_delivery_attempts WHERE inbox_item_id IN ({inbox_placeholders})",
+                    tuple(inbox_ids),
+                ).rowcount
+                inbox_count = conn.execute(
+                    f"DELETE FROM autonomy_inbox_items WHERE id IN ({inbox_placeholders})",
+                    tuple(inbox_ids),
+                ).rowcount
+            else:
+                inbox_count = 0
+
+            finding_count = 0
+            if finding_ids:
+                finding_placeholders = ",".join("?" for _ in finding_ids)
+                finding_count = conn.execute(
+                    f"DELETE FROM autonomy_findings WHERE id IN ({finding_placeholders})",
+                    tuple(finding_ids),
+                ).rowcount
+
+            artifact_count = 0
+            if artifact_ids:
+                artifact_placeholders = ",".join("?" for _ in artifact_ids)
+                artifact_count = conn.execute(
+                    f"DELETE FROM autonomy_artifacts WHERE id IN ({artifact_placeholders})",
+                    tuple(artifact_ids),
+                ).rowcount
+
+            watch_count = conn.execute(
+                f"DELETE FROM autonomy_watch_items WHERE id IN ({watch_placeholders})",
+                tuple(watch_ids),
+            ).rowcount
+
+            return {
+                "watch_items": int(watch_count or 0),
+                "findings": int(finding_count or 0),
+                "artifacts": int(artifact_count or 0),
+                "inbox_items": int(inbox_count or 0),
+                "delivery_attempts": int(delivery_count or 0),
+            }
+
+        return self._execute_write(_do)
+
+    def add_autonomy_finding(
+        self,
+        *,
+        run_id: Optional[int],
+        watch_item_id: Optional[int],
+        kind: str,
+        title: str,
+        summary: str,
+        details: Dict[str, Any] | None = None,
+        importance: str = "normal",
+        category: str = "utility",
+        message_preview: str = "",
+    ) -> Dict[str, Any]:
+        details_json = json.dumps(details or {})
+        created_at = time.time()
+
+        def _do(conn):
+            revision = self._next_autonomy_revision(conn)
+            cursor = conn.execute(
+                """INSERT INTO autonomy_findings
+                   (run_id, watch_item_id, kind, title, summary, details, importance, category, message_preview, created_at, revision)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id, watch_item_id, kind, title, summary, details_json, importance, category, message_preview, created_at, revision),
+            )
+            return {"id": cursor.lastrowid, "revision": revision}
+
+        return self._execute_write(_do)
+
+    def add_autonomy_artifact(
+        self,
+        *,
+        run_id: Optional[int],
+        watch_item_id: Optional[int],
+        artifact_type: str,
+        title: str,
+        summary: str,
+        payload: Dict[str, Any] | None = None,
+        target: Dict[str, Any] | None = None,
+        execution_requirements: Dict[str, Any] | None = None,
+        importance: str = "normal",
+        category: str = "utility",
+        approval_required: bool = False,
+        message_preview: str = "",
+        status: str = "draft",
+    ) -> Dict[str, Any]:
+        now_ts = time.time()
+        payload_json = json.dumps(payload or {})
+        target_json = json.dumps(target or {})
+        requirements_json = json.dumps(execution_requirements or {})
+
+        def _do(conn):
+            revision = self._next_autonomy_revision(conn)
+            cursor = conn.execute(
+                """INSERT INTO autonomy_artifacts
+                   (run_id, watch_item_id, artifact_type, title, summary, payload, target,
+                    execution_requirements, importance, category, approval_required, status,
+                    message_preview, created_at, updated_at, revision)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id, watch_item_id, artifact_type, title, summary, payload_json, target_json,
+                    requirements_json, importance, category, 1 if approval_required else 0, status,
+                    message_preview, now_ts, now_ts, revision,
+                ),
+            )
+            return {"id": cursor.lastrowid, "revision": revision}
+
+        return self._execute_write(_do)
+
+    def list_autonomy_artifacts(
+        self,
+        *,
+        statuses: Optional[List[str]] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        query = (
+            "SELECT id, run_id, watch_item_id, artifact_type, title, summary, payload, target, "
+            "execution_requirements, importance, category, approval_required, status, "
+            "message_preview, created_at, updated_at, revision "
+            "FROM autonomy_artifacts"
+        )
+        params: list[Any] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            query += f" WHERE status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY revision DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            for key in ("payload", "target", "execution_requirements"):
+                try:
+                    item[key] = json.loads(item.get(key) or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    item[key] = {}
+        return items
+
+    def upsert_autonomy_inbox_item(
+        self,
+        *,
+        source_type: str,
+        source_id: int,
+        title: str,
+        message_preview: str,
+        importance: str = "normal",
+        category: str = "utility",
+        approval_required: bool = False,
+        status: str = "pending",
+    ) -> Dict[str, Any]:
+        now_ts = time.time()
+
+        def _do(conn):
+            existing = conn.execute(
+                """SELECT id, title, message_preview, importance, category, approval_required, status, revision
+                   FROM autonomy_inbox_items
+                   WHERE source_type = ? AND source_id = ?""",
+                (source_type, source_id),
+            ).fetchone()
+            if existing:
+                changed = any([
+                    (existing["title"] or "") != title,
+                    (existing["message_preview"] or "") != message_preview,
+                    (existing["importance"] or "normal") != importance,
+                    (existing["category"] or "utility") != category,
+                    bool(existing["approval_required"]) != bool(approval_required),
+                    (existing["status"] or "pending") != status,
+                ])
+                if not changed:
+                    return {"id": existing["id"], "revision": existing["revision"], "changed": False}
+                revision = self._next_autonomy_revision(conn)
+                conn.execute(
+                    """UPDATE autonomy_inbox_items
+                       SET title = ?, message_preview = ?, importance = ?, category = ?, approval_required = ?,
+                           status = ?, updated_at = ?, revision = ?
+                       WHERE source_type = ? AND source_id = ?""",
+                    (
+                        title, message_preview, importance, category, 1 if approval_required else 0,
+                        status, now_ts, revision, source_type, source_id,
+                    ),
+                )
+                return {"id": existing["id"], "revision": revision, "changed": True}
+
+            revision = self._next_autonomy_revision(conn)
+            cursor = conn.execute(
+                """INSERT INTO autonomy_inbox_items
+                   (source_type, source_id, title, message_preview, importance, category, approval_required,
+                    status, created_at, updated_at, revision)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    source_type, source_id, title, message_preview, importance, category, 1 if approval_required else 0,
+                    status, now_ts, now_ts, revision,
+                ),
+            )
+            return {"id": cursor.lastrowid, "revision": revision, "changed": True}
+
+        return self._execute_write(_do)
+
+    def list_autonomy_inbox_items(
+        self,
+        *,
+        statuses: Optional[List[str]] = None,
+        since_revision: Optional[int] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        query = (
+            "SELECT id, source_type, source_id, title, message_preview, importance, category, approval_required, "
+            "status, seen_at, last_delivered_at, created_at, updated_at, revision "
+            "FROM autonomy_inbox_items"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+        if since_revision is not None:
+            clauses.append("revision > ?")
+            params.append(int(since_revision))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY revision DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_autonomy_inbox_items_seen(
+        self,
+        item_ids: List[int],
+        *,
+        delivered_at: Optional[float] = None,
+    ) -> None:
+        ids = [int(item_id) for item_id in item_ids if item_id is not None]
+        if not ids:
+            return
+        delivered_at = delivered_at or time.time()
+
+        def _do(conn):
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"""UPDATE autonomy_inbox_items
+                    SET status = 'seen',
+                        seen_at = COALESCE(seen_at, ?),
+                        last_delivered_at = ?
+                    WHERE id IN ({placeholders})""",
+                (delivered_at, delivered_at, *ids),
+            )
+
+        self._execute_write(_do)
+
+    def record_autonomy_delivery_attempt(
+        self,
+        *,
+        inbox_item_id: int,
+        mode: str,
+        status: str,
+        message_text: str = "",
+        target_platform: str = "",
+        target_chat_id: str = "",
+        target_thread_id: str = "",
+        error: str = "",
+        sent_at: Optional[float] = None,
+    ) -> int:
+        created_at = time.time()
+        sent_value = sent_at if sent_at is not None else (created_at if status == "sent" else None)
+
+        def _do(conn):
+            cursor = conn.execute(
+                """INSERT INTO autonomy_delivery_attempts
+                   (inbox_item_id, mode, status, message_text, target_platform, target_chat_id,
+                    target_thread_id, created_at, sent_at, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    inbox_item_id, mode, status, message_text, target_platform, target_chat_id,
+                    target_thread_id, created_at, sent_value, error,
+                ),
+            )
+            return cursor.lastrowid
+
+        return self._execute_write(_do)
+
+    def list_autonomy_runs(self, *, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, run_type, session_key, session_id, status, summary,
+                          payload, created_at, finished_at, error
+                   FROM autonomy_runs
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            try:
+                item["payload"] = json.loads(item.get("payload") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["payload"] = {}
+        return items
+
+    def get_autonomy_status_counts(self) -> Dict[str, int]:
+        with self._lock:
+            pending = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM autonomy_inbox_items WHERE status = 'pending'"
+            ).fetchone()["count"]
+            active_watch = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM autonomy_watch_items WHERE status = 'active'"
+            ).fetchone()["count"]
+            draft_artifacts = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM autonomy_artifacts WHERE status = 'draft'"
+            ).fetchone()["count"]
+        return {
+            "pending_inbox": int(pending or 0),
+            "active_watch_items": int(active_watch or 0),
+            "draft_artifacts": int(draft_artifacts or 0),
+        }
 
     # =========================================================================
     # Session lifecycle

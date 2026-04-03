@@ -121,6 +121,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/reload-mcp` (alias: `/reload_mcp`) | Reload MCP servers from config. |
 | `/yolo` | Toggle YOLO mode — skip all dangerous command approval prompts. |
 | `/commands [page]` | Browse all commands and skills (paginated). |
+| `/autonomy [status\|pause\|resume\|inbox\|watch\|drafts\|runs]` | Inspect or control the profile-scoped gateway autonomy loop. |
 | `/approve [session\|always]` | Approve and execute a pending dangerous command. `session` approves for this session only; `always` adds to permanent allowlist. |
 | `/deny` | Reject a pending dangerous command. |
 | `/update` | Update Hermes Agent to the latest version. |
@@ -131,6 +132,6 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 
 - `/skin`, `/tools`, `/toolsets`, `/browser`, `/config`, `/prompt`, `/cron`, `/skills`, `/platforms`, `/paste`, `/statusbar`, and `/plugins` are **CLI-only** commands.
 - `/verbose` is **CLI-only by default**, but can be enabled for messaging platforms by setting `display.tool_progress_command: true` in `config.yaml`. When enabled, it cycles the `display.tool_progress` mode and saves to config.
-- `/status`, `/sethome`, `/update`, `/approve`, `/deny`, and `/commands` are **messaging-only** commands.
+- `/status`, `/sethome`, `/autonomy`, `/update`, `/approve`, `/deny`, and `/commands` are **messaging-only** commands.
 - `/background`, `/voice`, `/reload-mcp`, `/rollback`, and `/yolo` work in **both** the CLI and the messaging gateway.
 - `/voice join`, `/voice channel`, and `/voice leave` are only meaningful on Discord.

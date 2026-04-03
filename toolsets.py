@@ -56,7 +56,9 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
-    # Cronjob management
+    # Autonomy + cron management
+    "autonomy_watch",
+    "cron_inspect",
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
@@ -127,6 +129,18 @@ TOOLSETS = {
     "cronjob": {
         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
         "tools": ["cronjob"],
+        "includes": []
+    },
+
+    "cron_read": {
+        "description": "Read-only cron inspection for checking existing scheduled jobs without modifying them",
+        "tools": ["cron_inspect"],
+        "includes": []
+    },
+
+    "autonomy": {
+        "description": "Profile-scoped autonomy watch management for open-ended monitoring",
+        "tools": ["autonomy_watch"],
         "includes": []
     },
     

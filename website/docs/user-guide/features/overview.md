@@ -19,6 +19,7 @@ Hermes Agent includes a rich set of capabilities that extend far beyond basic ch
 
 ## Automation
 
+- **[Autonomy](autonomy.md)** — Profile-scoped proactive behavior in the messaging gateway. Hermes can infer things to watch from conversation, revisit them in the background, draft follow-ups, and surface updates naturally in the configured home chat.
 - **[Scheduled Tasks (Cron)](cron.md)** — Schedule tasks to run automatically with natural language or cron expressions. Jobs can attach skills, deliver results to any platform, and support pause/resume/edit operations.
 - **[Subagent Delegation](delegation.md)** — The `delegate_task` tool spawns child agent instances with isolated context, restricted toolsets, and their own terminal sessions. Run up to 3 concurrent subagents for parallel workstreams.
 - **[Code Execution](code-execution.md)** — The `execute_code` tool lets the agent write Python scripts that call Hermes tools programmatically, collapsing multi-step workflows into a single LLM turn via sandboxed RPC execution.

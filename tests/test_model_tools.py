@@ -6,6 +6,7 @@ import pytest
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -101,3 +102,63 @@ class TestBackwardCompat:
     def test_tool_to_toolset_map(self):
         assert isinstance(TOOL_TO_TOOLSET_MAP, dict)
         assert len(TOOL_TO_TOOLSET_MAP) > 0
+
+
+class TestDynamicCronSchemaGuidance:
+    def test_cronjob_schema_mentions_autonomy_when_enabled(self, monkeypatch):
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.setenv("HERMES_AUTONOMY_ENABLED", "1")
+        monkeypatch.setenv("HERMES_AUTONOMY_EXTRACT_BEHAVIOR", "both")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "telegram:123")
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["cronjob", "cron_read", "autonomy"],
+            quiet_mode=True,
+        )
+        by_name = {tool["function"]["name"]: tool["function"] for tool in tools}
+
+        cron_desc = by_name["cronjob"]["description"]
+        inspect_desc = by_name["cron_inspect"]["description"]
+        autonomy_desc = by_name["autonomy_watch"]["description"]
+
+        assert "do not use cron for open-ended monitoring" in cron_desc.lower()
+        assert "rather than inventing a schedule" in cron_desc.lower()
+        assert "inspect first with cron_inspect" in cron_desc.lower()
+        assert "do not call cronjob(create) without a user-provided schedule" in cron_desc.lower()
+        assert "prefer autonomy_watch" in cron_desc.lower()
+        assert "before cronjob" in inspect_desc.lower()
+        assert "preferred way to register open-ended monitoring" in autonomy_desc.lower()
+        assert "do not call cronjob or monitoring skills first" in autonomy_desc.lower()
+
+    def test_auto_extract_mode_hides_autonomy_watch_and_mentions_hidden_extractor(self, monkeypatch):
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.setenv("HERMES_AUTONOMY_ENABLED", "1")
+        monkeypatch.setenv("HERMES_AUTONOMY_EXTRACT_BEHAVIOR", "auto_extract")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "telegram:123")
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["cronjob", "cron_read", "autonomy"],
+            quiet_mode=True,
+        )
+        by_name = {tool["function"]["name"]: tool["function"] for tool in tools}
+
+        cron_desc = by_name["cronjob"]["description"].lower()
+
+        assert "hidden post-turn autonomy extractor handles those" in cron_desc
+        assert "autonomy_watch" not in by_name
+
+    def test_cronjob_schema_default_description_unchanged_without_autonomy(self, monkeypatch):
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.delenv("HERMES_AUTONOMY_ENABLED", raising=False)
+        monkeypatch.delenv("HERMES_AUTONOMY_EXTRACT_BEHAVIOR", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["cronjob", "cron_read", "autonomy"],
+            quiet_mode=True,
+        )
+        by_name = {tool["function"]["name"]: tool["function"] for tool in tools}
+
+        cron_desc = by_name["cronjob"]["description"].lower()
+        assert "do not default to cron for open-ended monitoring" not in cron_desc
+        assert "autonomy_watch" not in by_name

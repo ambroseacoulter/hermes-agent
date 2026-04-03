@@ -215,6 +215,121 @@ class StreamingConfig:
 
 
 @dataclass
+class AutonomyConfig:
+    """Profile-scoped gateway autonomy configuration."""
+
+    enabled: bool = False
+    interval_seconds: int = 1800
+    max_iterations: int = 8
+    max_recent_messages: int = 10
+    poll_interval_seconds: int = 15
+
+    home_platform: str = ""
+    home_chat_id: str = ""
+    home_thread_id: str = ""
+    home_chat_type: str = ""
+
+    allowed_toolsets: List[str] = field(default_factory=lambda: ["search", "web", "session_search", "cron_read"])
+    infer_level: str = "implied"          # explicit | implied | aggressive
+    extract_behavior: str = "both"        # hermes | auto_extract | both
+    proactivity_level: str = "utility"   # utility | social | both
+    social_rate_limit_hours: int = 24
+    resolved_retention_days: int = 45
+
+    quiet_hours_enabled: bool = False
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "08:00"
+
+    inject_on_change_only: bool = True
+    new_session_injection: str = "important_only"  # none | important_only
+    allow_drafts: bool = True
+    allow_final_external_actions: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "interval_seconds": self.interval_seconds,
+            "max_iterations": self.max_iterations,
+            "max_recent_messages": self.max_recent_messages,
+            "poll_interval_seconds": self.poll_interval_seconds,
+            "home_platform": self.home_platform,
+            "home_chat_id": self.home_chat_id,
+            "home_thread_id": self.home_thread_id,
+            "home_chat_type": self.home_chat_type,
+            "allowed_toolsets": list(self.allowed_toolsets),
+            "infer_level": self.infer_level,
+            "extract_behavior": self.extract_behavior,
+            "proactivity_level": self.proactivity_level,
+            "social_rate_limit_hours": self.social_rate_limit_hours,
+            "resolved_retention_days": self.resolved_retention_days,
+            "quiet_hours_enabled": self.quiet_hours_enabled,
+            "quiet_hours_start": self.quiet_hours_start,
+            "quiet_hours_end": self.quiet_hours_end,
+            "inject_on_change_only": self.inject_on_change_only,
+            "new_session_injection": self.new_session_injection,
+            "allow_drafts": self.allow_drafts,
+            "allow_final_external_actions": self.allow_final_external_actions,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AutonomyConfig":
+        if not data:
+            return cls()
+        allowed_toolsets = data.get("allowed_toolsets")
+        if isinstance(allowed_toolsets, str):
+            allowed_toolsets = [allowed_toolsets]
+        if not isinstance(allowed_toolsets, list):
+            allowed_toolsets = ["search", "web", "session_search", "cron_read"]
+
+        infer_level = str(data.get("infer_level", "implied") or "implied").strip().lower()
+        if infer_level not in {"explicit", "implied", "aggressive"}:
+            infer_level = "implied"
+
+        extract_behavior = (
+            str(data.get("extract_behavior", "both") or "both")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        if extract_behavior not in {"hermes", "auto_extract", "both"}:
+            extract_behavior = "both"
+
+        proactivity_level = str(data.get("proactivity_level", "utility") or "utility").strip().lower()
+        if proactivity_level not in {"utility", "social", "both"}:
+            proactivity_level = "utility"
+
+        new_session_injection = str(data.get("new_session_injection", "important_only") or "important_only").strip().lower()
+        if new_session_injection not in {"none", "important_only"}:
+            new_session_injection = "important_only"
+
+        return cls(
+            enabled=_coerce_bool(data.get("enabled"), False),
+            interval_seconds=max(60, int(data.get("interval_seconds", 1800))),
+            max_iterations=max(1, int(data.get("max_iterations", 8))),
+            max_recent_messages=max(2, int(data.get("max_recent_messages", 10))),
+            poll_interval_seconds=max(5, int(data.get("poll_interval_seconds", 15))),
+            home_platform=str(data.get("home_platform") or "").strip().lower(),
+            home_chat_id=str(data.get("home_chat_id") or "").strip(),
+            home_thread_id=str(data.get("home_thread_id") or "").strip(),
+            home_chat_type=str(data.get("home_chat_type") or "").strip().lower(),
+            allowed_toolsets=[str(item).strip() for item in allowed_toolsets if str(item).strip()],
+            infer_level=infer_level,
+            extract_behavior=extract_behavior,
+            proactivity_level=proactivity_level,
+            social_rate_limit_hours=max(1, int(data.get("social_rate_limit_hours", 24))),
+            resolved_retention_days=max(1, int(data.get("resolved_retention_days", 45))),
+            quiet_hours_enabled=_coerce_bool(data.get("quiet_hours_enabled"), False),
+            quiet_hours_start=str(data.get("quiet_hours_start") or "22:00").strip(),
+            quiet_hours_end=str(data.get("quiet_hours_end") or "08:00").strip(),
+            inject_on_change_only=_coerce_bool(data.get("inject_on_change_only"), True),
+            new_session_injection=new_session_injection,
+            allow_drafts=_coerce_bool(data.get("allow_drafts"), True),
+            allow_final_external_actions=_coerce_bool(data.get("allow_final_external_actions"), False),
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -252,6 +367,9 @@ class GatewayConfig:
 
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
+
+    # Gateway-only autonomy subsystem
+    autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
 
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
@@ -335,6 +453,7 @@ class GatewayConfig:
             "group_sessions_per_user": self.group_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
+            "autonomy": self.autonomy.to_dict(),
         }
     
     @classmethod
@@ -394,6 +513,7 @@ class GatewayConfig:
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            autonomy=AutonomyConfig.from_dict(data.get("autonomy", {})),
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -470,6 +590,16 @@ def load_gateway_config() -> GatewayConfig:
             streaming_cfg = yaml_cfg.get("streaming")
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
+
+            autonomy_cfg = yaml_cfg.get("autonomy")
+            if isinstance(autonomy_cfg, dict):
+                quiet_cfg = autonomy_cfg.get("quiet_hours")
+                if isinstance(quiet_cfg, dict):
+                    autonomy_cfg = dict(autonomy_cfg)
+                    autonomy_cfg["quiet_hours_enabled"] = _coerce_bool(quiet_cfg.get("enabled"), False)
+                    autonomy_cfg["quiet_hours_start"] = str(quiet_cfg.get("start") or "22:00")
+                    autonomy_cfg["quiet_hours_end"] = str(quiet_cfg.get("end") or "08:00")
+                gw_data["autonomy"] = autonomy_cfg
 
             if "reset_triggers" in yaml_cfg:
                 gw_data["reset_triggers"] = yaml_cfg["reset_triggers"]

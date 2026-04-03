@@ -27,7 +27,7 @@ import time
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Any, List
 
 # ---------------------------------------------------------------------------
@@ -224,6 +224,18 @@ from gateway.session import (
     build_session_key,
 )
 from gateway.delivery import DeliveryRouter
+from gateway.autonomy import (
+    QuietHoursWindow,
+    build_autonomy_default_guidance,
+    build_autonomy_digest,
+    build_inbox_signature,
+    importance_rank,
+    is_within_quiet_hours,
+    normalize_resolved_watch_keys,
+    normalize_supervisor_payload,
+    normalize_watch_items,
+    parse_json_object,
+)
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
 
 
@@ -507,6 +519,13 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+
+        # Profile-scoped autonomy runtime state.
+        self._autonomy_supervisor_task: Optional[asyncio.Task] = None
+        self._autonomy_outbox_task: Optional[asyncio.Task] = None
+        self._autonomy_inflight_intakes: set[str] = set()
+        self._autonomy_last_pending_signature: str = ""
+        self._autonomy_last_signature_at: float = 0.0
 
     def _get_or_create_gateway_honcho(self, session_key: str):
         """Return a persistent Honcho manager/config pair for this gateway session."""
@@ -1261,6 +1280,19 @@ class GatewayRunner:
             )
         asyncio.create_task(self._platform_reconnect_watcher())
 
+        if self._autonomy_runtime_enabled():
+            self._autonomy_supervisor_task = asyncio.create_task(
+                self._autonomy_supervisor_watcher()
+            )
+            self._autonomy_outbox_task = asyncio.create_task(
+                self._autonomy_outbox_watcher()
+            )
+            self._background_tasks.add(self._autonomy_supervisor_task)
+            self._background_tasks.add(self._autonomy_outbox_task)
+            self._autonomy_supervisor_task.add_done_callback(self._background_tasks.discard)
+            self._autonomy_outbox_task.add_done_callback(self._background_tasks.discard)
+            logger.info("Autonomy runtime started")
+
         logger.info("Press Ctrl+C to stop")
         
         return True
@@ -1411,6 +1443,815 @@ class GatewayRunner:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _autonomy_runtime_enabled(self) -> bool:
+        return bool(
+            self.config.autonomy.enabled
+            and self._session_db is not None
+        )
+
+    def _resolve_autonomy_home_source(self) -> Optional[SessionSource]:
+        cfg = self.config.autonomy
+        platform_value = cfg.home_platform
+        chat_id = cfg.home_chat_id
+        thread_id = cfg.home_thread_id or None
+        chat_type = cfg.home_chat_type or ""
+        chat_name = None
+
+        if platform_value and chat_id:
+            try:
+                platform = Platform(platform_value)
+            except ValueError:
+                return None
+            home_channel = self.config.get_home_channel(platform)
+            chat_name = home_channel.name if home_channel else None
+            if not chat_type:
+                chat_type = "thread" if thread_id else "dm"
+            return SessionSource(
+                platform=platform,
+                chat_id=chat_id,
+                chat_name=chat_name or chat_id,
+                chat_type=chat_type,
+                thread_id=thread_id,
+            )
+
+        for platform, platform_cfg in self.config.platforms.items():
+            if not platform_cfg.enabled or not platform_cfg.home_channel:
+                continue
+            home = platform_cfg.home_channel
+            return SessionSource(
+                platform=platform,
+                chat_id=home.chat_id,
+                chat_name=home.name or home.chat_id,
+                chat_type="dm",
+            )
+        return None
+
+    def _autonomy_session_key_for_source(self, source: SessionSource) -> str:
+        return build_session_key(
+            source,
+            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+        )
+
+    def _autonomy_extract_behavior(self) -> str:
+        behavior = str(getattr(self.config.autonomy, "extract_behavior", "both") or "both").strip().lower()
+        return behavior if behavior in {"hermes", "auto_extract", "both"} else "both"
+
+    @staticmethod
+    def _turn_used_autonomy_watch(messages: List[Dict[str, Any]]) -> bool:
+        autonomy_call_ids: set[str] = set()
+        for message in messages:
+            if str(message.get("role") or "") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                if str(function.get("name") or "").strip() == "autonomy_watch":
+                    tool_call_id = str(tool_call.get("id") or "").strip()
+                    if tool_call_id:
+                        autonomy_call_ids.add(tool_call_id)
+        if not autonomy_call_ids:
+            return False
+
+        saw_result = False
+        for message in messages:
+            if str(message.get("role") or "") != "tool":
+                continue
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            if tool_call_id not in autonomy_call_ids:
+                continue
+            saw_result = True
+            payload = parse_json_object(str(message.get("content") or ""))
+            if not payload or payload.get("success", True):
+                return True
+        return not saw_result
+
+    def _should_run_post_turn_autonomy_intake(self, turn_messages: List[Dict[str, Any]]) -> bool:
+        behavior = self._autonomy_extract_behavior()
+        if behavior == "hermes":
+            return False
+        if behavior == "auto_extract":
+            return True
+        return not self._turn_used_autonomy_watch(turn_messages)
+
+    @staticmethod
+    def _summarize_autonomy_supervisor_run(
+        *,
+        payload_summary: str,
+        created_findings: int,
+        created_artifacts: int,
+        meaningful_watch_updates: int,
+    ) -> str:
+        summary_text = str(payload_summary or "").strip()
+        if not created_findings and not created_artifacts and meaningful_watch_updates == 0:
+            return "No new findings."
+        if summary_text:
+            return summary_text
+        if created_findings or created_artifacts:
+            return f"Created {created_findings} findings and {created_artifacts} artifacts"
+        if meaningful_watch_updates:
+            return f"Updated {meaningful_watch_updates} watch item(s)."
+        return "No new findings."
+
+    @staticmethod
+    def _autonomy_trim_text(value: Any, *, limit: int = 500) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        return text[: limit - 3] + "..." if len(text) > limit else text
+
+    def _autonomy_extract_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        limit: int,
+    ) -> List[Dict[str, str]]:
+        collected: List[Dict[str, str]] = []
+        for message in messages:
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            content = self._autonomy_trim_text(message.get("content"), limit=700)
+            if not content:
+                continue
+            collected.append({"role": role, "content": content})
+        return collected[-limit:]
+
+    def _autonomy_recent_activity_snapshot(self, *, limit_sessions: int = 3, limit_messages: int = 4) -> List[Dict[str, Any]]:
+        snapshot: List[Dict[str, Any]] = []
+        for entry in self.session_store.list_sessions()[:limit_sessions]:
+            transcript = self.session_store.load_transcript(entry.session_id)
+            snippet = self._autonomy_extract_messages(transcript, limit=limit_messages)
+            if not snippet:
+                continue
+            snapshot.append(
+                {
+                    "session_key": entry.session_key,
+                    "platform": entry.platform.value if entry.platform else "",
+                    "chat_type": entry.chat_type,
+                    "updated_at": entry.updated_at.isoformat() if entry.updated_at else "",
+                    "messages": snippet,
+                }
+            )
+        return snapshot
+
+    async def _run_autonomy_agent(
+        self,
+        prompt: str,
+        *,
+        source: SessionSource,
+        session_id: str,
+        enabled_toolsets: List[str],
+        max_iterations: int,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        from run_agent import AIAgent
+
+        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        if not runtime_kwargs.get("api_key"):
+            return {"final_response": "", "error": "no provider credentials configured"}
+
+        user_config = _load_gateway_config()
+        model = _resolve_gateway_model(user_config)
+        reasoning_config = self._load_reasoning_config()
+        turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+        platform_key = _platform_config_key(source.platform)
+        pr = self._provider_routing
+
+        def run_sync():
+            agent = AIAgent(
+                model=turn_route["model"],
+                **turn_route["runtime"],
+                max_iterations=max_iterations,
+                quiet_mode=True,
+                verbose_logging=False,
+                enabled_toolsets=enabled_toolsets,
+                reasoning_config=reasoning_config,
+                providers_allowed=pr.get("only"),
+                providers_ignored=pr.get("ignore"),
+                providers_order=pr.get("order"),
+                provider_sort=pr.get("sort"),
+                provider_require_parameters=pr.get("require_parameters", False),
+                provider_data_collection=pr.get("data_collection"),
+                session_id=session_id,
+                platform=platform_key,
+                session_db=self._session_db,
+                fallback_model=self._fallback_model,
+                skip_context_files=True,
+                persist_session=False,
+            )
+            agent._print_fn = lambda *a, **kw: None
+            return agent.run_conversation(
+                user_message=prompt,
+                conversation_history=conversation_history or [],
+                task_id=session_id,
+                sync_honcho=False,
+            )
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, run_sync)
+
+    def _schedule_autonomy_intake(
+        self,
+        *,
+        session_entry,
+        source: SessionSource,
+        conversation_messages: List[Dict[str, str]],
+        source_message_ref: Optional[str],
+    ) -> None:
+        if not self._autonomy_runtime_enabled():
+            return
+        if not conversation_messages:
+            return
+        if session_entry.session_key in self._autonomy_inflight_intakes:
+            return
+        self._autonomy_inflight_intakes.add(session_entry.session_key)
+        task = asyncio.create_task(
+            self._run_autonomy_intake(
+                session_key=session_entry.session_key,
+                session_id=session_entry.session_id,
+                source=source,
+                conversation_messages=conversation_messages,
+                source_message_ref=source_message_ref,
+            )
+        )
+        self._background_tasks.add(task)
+
+        def _cleanup(done_task: asyncio.Task) -> None:
+            self._background_tasks.discard(done_task)
+            self._autonomy_inflight_intakes.discard(session_entry.session_key)
+
+        task.add_done_callback(_cleanup)
+
+    @staticmethod
+    def _should_schedule_autonomy_intake(event: MessageEvent) -> bool:
+        """Return True when an inbound event should feed the autonomy intake.
+
+        Internal synthetic turns can reuse the normal gateway message pipeline,
+        but they should not recursively create new autonomy intake runs.
+        """
+        return not bool(getattr(event, "skip_autonomy_intake", False))
+
+    async def _run_autonomy_intake(
+        self,
+        *,
+        session_key: str,
+        session_id: str,
+        source: SessionSource,
+        conversation_messages: List[Dict[str, str]],
+        source_message_ref: Optional[str],
+    ) -> None:
+        cfg = self.config.autonomy
+        extract_behavior = self._autonomy_extract_behavior()
+        home_source = self._resolve_autonomy_home_source()
+        home_label = ""
+        if home_source:
+            home_label = f"{home_source.platform.value}:{home_source.chat_id}"
+            if home_source.thread_id:
+                home_label += f"#{home_source.thread_id}"
+        default_guidance = build_autonomy_default_guidance(
+            interval_seconds=cfg.interval_seconds,
+            home_label=home_label,
+        )
+        existing_watch_items = self._session_db.list_autonomy_watch_items(
+            statuses=["active", "paused"],
+            limit=50,
+        )
+        run_id = self._session_db.create_autonomy_run(
+            "intake",
+            session_key=session_key,
+            session_id=session_id,
+            payload={"message_count": len(conversation_messages)},
+        )
+        prompt = (
+            "You are Hermes's hidden autonomy intake. Review the recent conversation and extract only "
+            "durable follow-ups Hermes should monitor proactively across sessions, and note when existing watch items are now resolved.\n"
+            "Return only JSON with this shape:\n"
+            "{\"watch_items\":[{\"key\":\"optional-existing-key\",\"title\":\"...\",\"kind\":\"topic|repo|issue|person|deadline|project|other\","
+            "\"description\":\"...\",\"importance\":\"low|normal|high|critical\","
+            "\"inference_mode\":\"explicit|implied|aggressive\",\"due_at\":\"ISO-8601 or empty\"}],"
+            "\"resolved_watch_keys\":[\"existing-watch-key-or-title\"]}\n"
+            "Rules:\n"
+            "- Include only ongoing watch-worthy items, deadlines, follow-ups, or things Hermes should keep tabs on.\n"
+            "- Exclude one-off completed tasks, resolved chat, and anything requiring a cron schedule instead of monitoring.\n"
+            "- Titles must name the subject being watched, not meta labels like 'watcher setup' or 'monitoring setup'.\n"
+            "- If a new watch overlaps an existing watch item, reuse the existing item's key instead of creating a duplicate.\n"
+            "- If the user clearly indicates an existing tracked item is done, sent, handled, no longer needed, or Hermes should stop tracking it, add it to resolved_watch_keys.\n"
+            f"- Extraction mode for this profile: {extract_behavior}.\n"
+            f"- Default inference_mode to {cfg.infer_level} when uncertain.\n"
+            f"- Defaults: {default_guidance}\n"
+            "Existing watch items JSON:\n"
+            f"{json.dumps(existing_watch_items, ensure_ascii=False)}\n"
+            "Recent conversation JSON:\n"
+            f"{json.dumps(conversation_messages, ensure_ascii=False)}"
+        )
+
+        try:
+            result = await self._run_autonomy_agent(
+                prompt,
+                source=source,
+                session_id=f"autonomy-intake-{session_id}",
+                enabled_toolsets=[],
+                max_iterations=3,
+            )
+            payload = parse_json_object(result.get("final_response") or "")
+            watch_items = normalize_watch_items(
+                payload,
+                cfg.infer_level,
+                existing_items=existing_watch_items,
+            )
+            resolved_watch_keys = normalize_resolved_watch_keys(
+                payload,
+                existing_items=existing_watch_items,
+            )
+            next_check_at = time.time() + min(max(cfg.interval_seconds, 300), 1800)
+            upserts = 0
+            resolved = 0
+            for watch_key in resolved_watch_keys:
+                self._session_db.update_autonomy_watch_item(
+                    watch_key,
+                    status="resolved",
+                    next_check_at=next_check_at,
+                    last_checked_at=time.time(),
+                )
+                resolved += 1
+            for item in watch_items:
+                if item["normalized_key"] in resolved_watch_keys:
+                    continue
+                self._session_db.upsert_autonomy_watch_item(
+                    normalized_key=item["normalized_key"],
+                    title=item["title"],
+                    kind=item["kind"],
+                    description=item["description"],
+                    importance=item["importance"],
+                    source_session_key=session_key,
+                    source_message_ref=source_message_ref,
+                    inference_mode=item["inference_mode"],
+                    due_at=item["due_at"].timestamp() if item["due_at"] else None,
+                    next_check_at=next_check_at,
+                    metadata={"source_platform": source.platform.value if source.platform else ""},
+                )
+                upserts += 1
+            self._session_db.finish_autonomy_run(
+                run_id,
+                status="completed",
+                summary=f"Extracted {upserts} watch item(s), resolved {resolved}",
+                payload={"watch_items": upserts, "resolved_watch_items": resolved},
+            )
+        except Exception as exc:
+            logger.debug("Autonomy intake failed for %s: %s", session_key, exc)
+            self._session_db.finish_autonomy_run(
+                run_id,
+                status="failed",
+                error=str(exc),
+                payload={"message_count": len(conversation_messages)},
+            )
+
+    async def _autonomy_supervisor_watcher(self) -> None:
+        cfg = self.config.autonomy
+        await asyncio.sleep(20)
+        while self._running:
+            try:
+                await self._run_autonomy_supervisor_tick()
+            except Exception as exc:
+                logger.debug("Autonomy supervisor watcher error: %s", exc)
+            for _ in range(max(5, int(cfg.interval_seconds))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
+    async def _run_autonomy_supervisor_tick(self) -> None:
+        if not self._autonomy_runtime_enabled():
+            return
+        state = self._session_db.get_autonomy_state()
+        if state.get("paused"):
+            return
+
+        cfg = self.config.autonomy
+        self._session_db.prune_autonomy_resolved(
+            older_than_ts=time.time() - (cfg.resolved_retention_days * 86400),
+        )
+        due_items = self._session_db.list_due_autonomy_watch_items(limit=12)
+        if not due_items and cfg.proactivity_level == "utility":
+            return
+
+        home_source = self._resolve_autonomy_home_source()
+        if not home_source:
+            return
+
+        recent_activity = self._autonomy_recent_activity_snapshot(
+            limit_sessions=3,
+            limit_messages=max(2, min(cfg.max_recent_messages, 6)),
+        )
+        home_label = f"{home_source.platform.value}:{home_source.chat_id}"
+        if home_source.thread_id:
+            home_label += f"#{home_source.thread_id}"
+        default_guidance = build_autonomy_default_guidance(
+            interval_seconds=cfg.interval_seconds,
+            home_label=home_label,
+        )
+        run_id = self._session_db.create_autonomy_run(
+            "supervisor",
+            session_key=self._autonomy_session_key_for_source(home_source),
+            session_id=f"autonomy-supervisor-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            payload={
+                "due_watch_items": len(due_items),
+                "recent_sessions": len(recent_activity),
+            },
+        )
+
+        social_allowed = cfg.proactivity_level in {"social", "both"}
+        extract_behavior = self._autonomy_extract_behavior()
+        prompt = (
+            "You are Hermes's profile-wide autonomy supervisor. Decide what Hermes should proactively "
+            "surface, research, or draft in the background.\n"
+            "You may use the available tools to do research, but do not take irreversible external actions. "
+            "Drafts are allowed; final sends are not.\n"
+            "Return only JSON with this exact top-level shape:\n"
+            "{\"summary\":\"...\",\"watch_updates\":[...],\"findings\":[...],\"artifacts\":[...]}\n"
+            "Requirements:\n"
+            "- Keep outputs sparse and high-signal.\n"
+            "- The summary is an internal operator note for /autonomy runs, not user-facing copy.\n"
+            "- The summary must describe only what changed in this run. Do not restate stable watch setup, delivery routing, or unchanged background context.\n"
+            "- If this run only checked watches and found nothing new, use a terse summary like 'No new findings.'\n"
+            "- For open-ended monitoring requests, prefer the autonomy loop over cron unless the user explicitly asked for time-based scheduling.\n"
+            "- If the request is ambiguous between autonomy and cron, do not force cron.\n"
+            "- Never invent a schedule, repeat count, or expiry window the user did not ask for.\n"
+            "- Use category=utility for practical updates and category=social for optional social nudges.\n"
+            "- Only emit social items if they feel natural, lightweight, and non-repetitive.\n"
+            "- If a tracked watch item now appears complete, obsolete, or no longer worth monitoring, add a watch_update with status=resolved.\n"
+            "- Do not treat missing frequency or delivery preference as blocking when the request is ordinary open-ended monitoring.\n"
+            "- Do not surface reminder items that only ask the user to confirm cadence or delivery target when the profile defaults already cover it.\n"
+            "- If cron_inspect is available, use it when helpful to check whether a similar recurring cron job already covers the same topic.\n"
+            "- If an existing cron seems to cover the same thing, you may choose to resolve the watch as superseded by cron, but only when that overlap is genuinely clear.\n"
+            "- If there is ambiguity about whether cron already covers it, pass rather than forcing a cron-centric interpretation.\n"
+            "- Never invent or copy a cron cadence, repeat count, expiry window, or polling interval for an autonomy watch.\n"
+            "- Do not say a watch is running every N minutes unless that schedule truly exists as a cron job you inspected.\n"
+            "- Do not transfer one topic's cron cadence onto a different watch item.\n"
+            "- If nothing is worth surfacing, return empty arrays.\n"
+            f"- Extract behavior for this profile: {extract_behavior}. Respect the existing watch state instead of inventing a separate scheduling path.\n"
+            f"- Social outputs allowed: {'yes' if social_allowed else 'no'}.\n"
+            f"- Proactivity level: {cfg.proactivity_level}.\n"
+            f"- Allow drafts: {'yes' if cfg.allow_drafts else 'no'}.\n"
+            f"- Last social nudge at: {state.get('last_social_nudge_at') or 'never'}.\n"
+            f"- Defaults: {default_guidance}\n"
+            "Due watch items JSON:\n"
+            f"{json.dumps(due_items, ensure_ascii=False)}\n"
+            "Recent activity JSON:\n"
+            f"{json.dumps(recent_activity, ensure_ascii=False)}"
+        )
+
+        try:
+            result = await self._run_autonomy_agent(
+                prompt,
+                source=home_source,
+                session_id=f"autonomy-supervisor-{run_id}",
+                enabled_toolsets=list(cfg.allowed_toolsets),
+                max_iterations=cfg.max_iterations,
+            )
+            payload = normalize_supervisor_payload(
+                parse_json_object(result.get("final_response") or "")
+            )
+            watch_lookup = {item["normalized_key"]: item for item in due_items}
+            created_findings = 0
+            created_artifacts = 0
+            now_ts = time.time()
+            meaningful_watch_updates = 0
+
+            for update in payload["watch_updates"]:
+                prior_item = watch_lookup.get(update["key"]) or {}
+                prior_status = str(prior_item.get("status") or "active").strip().lower()
+                prior_description = str(prior_item.get("description") or "").strip()
+                prior_importance = str(prior_item.get("importance") or "normal").strip().lower()
+                if (
+                    not prior_item
+                    or update["status"] != prior_status
+                    or (update["description"] and update["description"] != prior_description)
+                    or update["importance"] != prior_importance
+                ):
+                    meaningful_watch_updates += 1
+                next_check_at = now_ts + (
+                    update["next_check_in_minutes"] * 60
+                    if update["next_check_in_minutes"] is not None
+                    else max(cfg.interval_seconds, 300)
+                )
+                self._session_db.update_autonomy_watch_item(
+                    update["key"],
+                    status=update["status"],
+                    next_check_at=next_check_at,
+                    description=update["description"] or None,
+                    importance=update["importance"],
+                    last_checked_at=now_ts,
+                )
+
+            updated_keys = {item["key"] for item in payload["watch_updates"]}
+            for due_item in due_items:
+                if due_item["normalized_key"] in updated_keys:
+                    continue
+                self._session_db.update_autonomy_watch_item(
+                    due_item["normalized_key"],
+                    next_check_at=now_ts + max(cfg.interval_seconds, 300),
+                    last_checked_at=now_ts,
+                )
+
+            for finding in payload["findings"]:
+                if finding["category"] == "social" and not social_allowed:
+                    continue
+                watch_item = watch_lookup.get(finding["watch_key"] or "")
+                record = self._session_db.add_autonomy_finding(
+                    run_id=run_id,
+                    watch_item_id=watch_item["id"] if watch_item else None,
+                    kind=finding["kind"],
+                    title=finding["title"],
+                    summary=finding["summary"],
+                    details=finding["details"],
+                    importance=finding["importance"],
+                    category=finding["category"],
+                    message_preview=finding["message_preview"],
+                )
+                self._session_db.upsert_autonomy_inbox_item(
+                    source_type="finding",
+                    source_id=record["id"],
+                    title=finding["title"],
+                    message_preview=finding["message_preview"],
+                    importance=finding["importance"],
+                    category=finding["category"],
+                    approval_required=False,
+                )
+                created_findings += 1
+
+            for artifact in payload["artifacts"]:
+                if artifact["category"] == "social" and not social_allowed:
+                    continue
+                if not cfg.allow_drafts and artifact["artifact_type"] == "draft_email":
+                    continue
+                watch_item = watch_lookup.get(artifact["watch_key"] or "")
+                record = self._session_db.add_autonomy_artifact(
+                    run_id=run_id,
+                    watch_item_id=watch_item["id"] if watch_item else None,
+                    artifact_type=artifact["artifact_type"],
+                    title=artifact["title"],
+                    summary=artifact["summary"],
+                    payload=artifact["payload"],
+                    target=artifact["target"],
+                    execution_requirements=artifact["execution_requirements"],
+                    importance=artifact["importance"],
+                    category=artifact["category"],
+                    approval_required=artifact["approval_required"],
+                    message_preview=artifact["message_preview"],
+                    status="draft",
+                )
+                self._session_db.upsert_autonomy_inbox_item(
+                    source_type="artifact",
+                    source_id=record["id"],
+                    title=artifact["title"],
+                    message_preview=artifact["message_preview"],
+                    importance=artifact["importance"],
+                    category=artifact["category"],
+                    approval_required=artifact["approval_required"],
+                )
+                created_artifacts += 1
+
+            self._session_db.mark_autonomy_supervisor_run()
+            summary_text = self._summarize_autonomy_supervisor_run(
+                payload_summary=payload["summary"],
+                created_findings=created_findings,
+                created_artifacts=created_artifacts,
+                meaningful_watch_updates=meaningful_watch_updates,
+            )
+            self._session_db.finish_autonomy_run(
+                run_id,
+                status="completed",
+                summary=summary_text,
+                payload={
+                    "created_findings": created_findings,
+                    "created_artifacts": created_artifacts,
+                    "updated_watch_items": meaningful_watch_updates,
+                },
+            )
+        except Exception as exc:
+            logger.debug("Autonomy supervisor tick failed: %s", exc)
+            self._session_db.finish_autonomy_run(
+                run_id,
+                status="failed",
+                error=str(exc),
+            )
+
+    def _autonomy_digest_for_session(self, session_entry) -> tuple[str, int]:
+        if not self._autonomy_runtime_enabled():
+            return "", 0
+        cfg = self.config.autonomy
+        since_revision = int(session_entry.last_autonomy_revision_seen or 0)
+        items = self._session_db.list_autonomy_inbox_items(
+            since_revision=since_revision,
+            limit=8,
+        )
+        if not items:
+            return "", 0
+
+        is_new_session = (
+            session_entry.last_autonomy_revision_seen == 0
+            and session_entry.created_at == session_entry.updated_at
+        )
+        if is_new_session and cfg.new_session_injection == "none":
+            return "", 0
+        if is_new_session and cfg.new_session_injection == "important_only":
+            items = [
+                item for item in items
+                if item.get("approval_required") or importance_rank(item.get("importance")) >= 2
+            ]
+            if not items:
+                return "", 0
+
+        digest = build_autonomy_digest(items)
+        if not digest:
+            return "", 0
+        max_revision = max(int(item.get("revision") or 0) for item in items)
+        return digest, max_revision
+
+    def _autonomy_items_ready_for_delivery(self) -> List[Dict[str, Any]]:
+        items = self._session_db.list_autonomy_inbox_items(
+            statuses=["pending"],
+            limit=12,
+        )
+        cfg = self.config.autonomy
+        if cfg.proactivity_level == "utility":
+            items = [item for item in items if item.get("category") != "social"]
+        elif cfg.proactivity_level == "social":
+            items = [item for item in items if item.get("category") == "social"]
+        return items
+
+    def _autonomy_quiet_hours_block(self, items: List[Dict[str, Any]]) -> bool:
+        cfg = self.config.autonomy
+        if not items:
+            return True
+        window = QuietHoursWindow(
+            enabled=cfg.quiet_hours_enabled,
+            start=cfg.quiet_hours_start,
+            end=cfg.quiet_hours_end,
+        )
+        if not is_within_quiet_hours(window, datetime.now()):
+            return False
+        for item in items:
+            if item.get("approval_required") or importance_rank(item.get("importance")) >= 2:
+                return False
+        return True
+
+    async def _autonomy_outbox_watcher(self) -> None:
+        cfg = self.config.autonomy
+        await asyncio.sleep(30)
+        while self._running:
+            try:
+                await self._run_autonomy_outbox_tick()
+            except Exception as exc:
+                logger.debug("Autonomy outbox watcher error: %s", exc)
+            for _ in range(max(5, int(cfg.poll_interval_seconds))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
+    async def _run_autonomy_outbox_tick(self) -> None:
+        if not self._autonomy_runtime_enabled():
+            return
+        state = self._session_db.get_autonomy_state()
+        if state.get("paused"):
+            return
+
+        home_source = self._resolve_autonomy_home_source()
+        if not home_source:
+            return
+        adapter = self.adapters.get(home_source.platform)
+        if not adapter:
+            return
+
+        pending_items = self._autonomy_items_ready_for_delivery()
+        if not pending_items:
+            self._autonomy_last_pending_signature = ""
+            self._autonomy_last_signature_at = 0.0
+            return
+        if self._autonomy_quiet_hours_block(pending_items):
+            return
+
+        if any(item.get("category") == "social" for item in pending_items):
+            last_social = state.get("last_social_nudge_at")
+            if last_social:
+                next_allowed = float(last_social) + (self.config.autonomy.social_rate_limit_hours * 3600)
+                if time.time() < next_allowed:
+                    pending_items = [item for item in pending_items if item.get("category") != "social"]
+                    if not pending_items:
+                        return
+
+        home_session_key = self._autonomy_session_key_for_source(home_source)
+        running = self._running_agents.get(home_session_key)
+        if running:
+            return
+
+        signature = build_inbox_signature(pending_items)
+        now_ts = time.time()
+        if (
+            signature == self._autonomy_last_pending_signature
+            and now_ts - self._autonomy_last_signature_at < 120
+        ):
+            return
+
+        session_entry = self.session_store.get_or_create_session(home_source)
+        message_text = await self._run_autonomy_synthesis_turn(
+            source=home_source,
+            session_entry=session_entry,
+            pending_items=pending_items,
+        )
+        if not message_text:
+            self._autonomy_last_pending_signature = signature
+            self._autonomy_last_signature_at = now_ts
+            return
+
+        metadata = {"thread_id": home_source.thread_id} if home_source.thread_id else None
+        try:
+            await adapter.send(home_source.chat_id, message_text, metadata=metadata)
+        except Exception as exc:
+            logger.debug("Autonomy delivery failed: %s", exc)
+            for item in pending_items:
+                self._session_db.record_autonomy_delivery_attempt(
+                    inbox_item_id=item["id"],
+                    mode="proactive",
+                    status="failed",
+                    message_text=message_text,
+                    target_platform=home_source.platform.value,
+                    target_chat_id=home_source.chat_id,
+                    target_thread_id=home_source.thread_id or "",
+                    error=str(exc),
+                )
+            self._autonomy_last_pending_signature = signature
+            self._autonomy_last_signature_at = now_ts
+            return
+
+        delivered_at = time.time()
+        for item in pending_items:
+            self._session_db.record_autonomy_delivery_attempt(
+                inbox_item_id=item["id"],
+                mode="proactive",
+                status="sent",
+                message_text=message_text,
+                target_platform=home_source.platform.value,
+                target_chat_id=home_source.chat_id,
+                target_thread_id=home_source.thread_id or "",
+                sent_at=delivered_at,
+            )
+        self._session_db.mark_autonomy_inbox_items_seen(
+            [int(item["id"]) for item in pending_items],
+            delivered_at=delivered_at,
+        )
+        self._session_db.mark_autonomy_delivery(
+            social=all(item.get("category") == "social" for item in pending_items),
+            delivered_at=delivered_at,
+        )
+        self.session_store.append_to_transcript(
+            session_entry.session_id,
+            {
+                "role": "assistant",
+                "content": message_text,
+                "timestamp": datetime.now().isoformat(),
+            },
+        )
+        max_revision = max(int(item.get("revision") or 0) for item in pending_items)
+        self.session_store.mark_autonomy_push(
+            home_session_key,
+            pushed_at=datetime.now(),
+            revision=max_revision,
+        )
+        self._autonomy_last_pending_signature = signature
+        self._autonomy_last_signature_at = delivered_at
+
+    async def _run_autonomy_synthesis_turn(
+        self,
+        *,
+        source: SessionSource,
+        session_entry,
+        pending_items: List[Dict[str, Any]],
+    ) -> str:
+        history = self.session_store.load_transcript(session_entry.session_id)
+        history_messages = self._autonomy_extract_messages(history, limit=8)
+        prompt = (
+            "You are Hermes composing a proactive message to the user. Write exactly one natural message "
+            "in Hermes's normal voice. Do not mention background loops, queues, inboxes, or hidden processes.\n"
+            "Rules:\n"
+            "- Be concise and natural.\n"
+            "- If an item needs approval, ask for the approval naturally.\n"
+            "- If multiple updates exist, synthesize them into one coherent message.\n"
+            "- Do not fabricate actions already taken.\n"
+            "Recent visible conversation JSON:\n"
+            f"{json.dumps(history_messages, ensure_ascii=False)}\n"
+            "Pending autonomy items JSON:\n"
+            f"{json.dumps(pending_items, ensure_ascii=False)}"
+        )
+        result = await self._run_autonomy_agent(
+            prompt,
+            source=source,
+            session_id=f"autonomy-surface-{session_entry.session_id}",
+            enabled_toolsets=[],
+            max_iterations=3,
+        )
+        return self._autonomy_trim_text(result.get("final_response"), limit=4000)
 
     async def stop(self) -> None:
         """Stop the gateway and disconnect all adapters."""
@@ -1944,6 +2785,9 @@ class GatewayRunner:
         if canonical == "sethome":
             return await self._handle_set_home_command(event)
 
+        if canonical == "autonomy":
+            return await self._handle_autonomy_command(event)
+
         if canonical == "compress":
             return await self._handle_compress_command(event)
 
@@ -2124,6 +2968,46 @@ class GatewayRunner:
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
+        if self._autonomy_runtime_enabled():
+            home_source = self._resolve_autonomy_home_source()
+            home_label = ""
+            if home_source:
+                home_label = f"{home_source.platform.value}:{home_source.chat_id}"
+                if home_source.thread_id:
+                    home_label += f"#{home_source.thread_id}"
+            default_guidance = build_autonomy_default_guidance(
+                interval_seconds=self.config.autonomy.interval_seconds,
+                home_label=home_label,
+            )
+            extract_behavior = self._autonomy_extract_behavior()
+            if extract_behavior == "hermes":
+                behavior_guidance = (
+                    "This profile is set to Hermes-managed watch registration. "
+                    "For open-ended monitoring requests, prefer autonomy_watch over cronjob so you can register a real autonomy watch immediately."
+                )
+            elif extract_behavior == "auto_extract":
+                behavior_guidance = (
+                    "This profile is set to extractor-managed watch registration. "
+                    "A hidden post-turn autonomy extractor will register durable watch items after the turn, so it is safe to simply acknowledge that Hermes will keep an eye on it."
+                )
+            else:
+                behavior_guidance = (
+                    "This profile uses hybrid watch registration. "
+                    "Prefer autonomy_watch for explicit open-ended monitoring requests, and rely on the hidden post-turn extractor as a safety net for implied or missed watch items."
+                )
+            context_prompt += (
+                "\n\n## Profile Autonomy\n"
+                "A profile-wide autonomy loop is enabled for this user while the gateway is running. "
+                f"{default_guidance} "
+                "Leave normal cron behavior alone for explicitly time-based requests. "
+                f"{behavior_guidance} "
+                "Do not use cronjob, RSS/blog monitoring skills, or similar tools as a prerequisite for open-ended monitoring. "
+                "For requests like 'keep an eye on OpenAI', the correct path is to register the watch or confidently acknowledge that the extractor will do it. "
+                "Keep the user-facing reply natural. Do not mention the autonomy loop, minute cadence, hidden extraction, watch storage, or home-channel routing unless the user explicitly asks about setup or internals. "
+                "If the user says 'interesting', pick a sensible broad default rather than asking a follow-up on the first acknowledgment unless they asked for tighter filtering. "
+                "If the user's request is ambiguous, pass rather than defaulting to cron. "
+                "Do not invent an every-N-minutes schedule, repeat count, or auto-expiry window when the user did not ask for one."
+            )
         
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
@@ -2604,6 +3488,13 @@ class GatewayRunner:
             if not found_in_history:
                 message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
 
+        persist_message_text = message_text
+        autonomy_revision_injected = 0
+        if self._autonomy_runtime_enabled():
+            autonomy_digest, autonomy_revision_injected = self._autonomy_digest_for_session(session_entry)
+            if autonomy_digest:
+                message_text = f"{autonomy_digest}\n\n{message_text}"
+
         try:
             # Emit agent:start hook
             hook_ctx = {
@@ -2647,6 +3538,7 @@ class GatewayRunner:
                 session_id=session_entry.session_id,
                 session_key=session_key,
                 event_message_id=event.message_id,
+                persist_user_message=persist_message_text if message_text != persist_message_text else None,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -2834,6 +3726,36 @@ class GatewayRunner:
                 provider=agent_result.get("provider"),
                 base_url=agent_result.get("base_url"),
             )
+
+            if autonomy_revision_injected > 0:
+                self.session_store.mark_autonomy_revision_seen(
+                    session_key,
+                    autonomy_revision_injected,
+                )
+
+            if (
+                not agent_failed_early
+                and self._autonomy_runtime_enabled()
+                and self._should_schedule_autonomy_intake(event)
+            ):
+                history_len = agent_result.get("history_offset", len(history))
+                turn_agent_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
+                if self._should_run_post_turn_autonomy_intake(turn_agent_messages):
+                    turn_messages = self._autonomy_extract_messages(
+                        turn_agent_messages,
+                        limit=6,
+                    )
+                    if not turn_messages and response:
+                        turn_messages = [
+                            {"role": "user", "content": persist_message_text},
+                            {"role": "assistant", "content": response},
+                        ]
+                    self._schedule_autonomy_intake(
+                        session_entry=session_entry,
+                        source=source,
+                        conversation_messages=turn_messages,
+                        source_message_ref=event.message_id,
+                    )
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
@@ -3429,6 +4351,89 @@ class GatewayRunner:
         return (
             f"✅ Home channel set to **{chat_name}** (ID: {chat_id}).\n"
             f"Cron jobs and cross-platform messages will be delivered here."
+        )
+
+    async def _handle_autonomy_command(self, event: MessageEvent) -> str:
+        """Inspect or control the profile-scoped autonomy runtime."""
+        if not self._session_db:
+            return "Autonomy is unavailable because the SQLite state store is not active."
+
+        args = event.get_command_args().strip().lower()
+        subcommand = args.split(maxsplit=1)[0] if args else "status"
+        state = self._session_db.get_autonomy_state()
+        counts = self._session_db.get_autonomy_status_counts()
+        home_source = self._resolve_autonomy_home_source()
+
+        if subcommand == "pause":
+            self._session_db.set_autonomy_paused(True)
+            return "Autonomy paused for this profile."
+
+        if subcommand == "resume":
+            self._session_db.set_autonomy_paused(False)
+            return "Autonomy resumed for this profile."
+
+        if subcommand == "inbox":
+            items = self._session_db.list_autonomy_inbox_items(limit=10)
+            if not items:
+                return "Autonomy inbox is empty."
+            lines = ["Autonomy inbox:"]
+            for item in items:
+                lines.append(
+                    f"- [{item['status']}] {item['title']} ({item['importance']}, {item['category']}, rev {item['revision']})"
+                )
+            return "\n".join(lines)
+
+        if subcommand == "watch":
+            items = self._session_db.list_autonomy_watch_items(limit=10)
+            if not items:
+                return "No autonomy watch items yet."
+            lines = ["Autonomy watch list:"]
+            for item in items:
+                lines.append(
+                    f"- [{item['status']}] {item['title']} ({item['importance']}, {item['kind']})"
+                )
+            return "\n".join(lines)
+
+        if subcommand == "drafts":
+            items = self._session_db.list_autonomy_artifacts(statuses=["draft"], limit=10)
+            if not items:
+                return "No autonomy drafts are waiting."
+            lines = ["Autonomy drafts:"]
+            for item in items:
+                approval = " approval-required" if item.get("approval_required") else ""
+                lines.append(
+                    f"- [{item['artifact_type']}] {item['title']} ({item['importance']},{approval or ' draft'})"
+                )
+            return "\n".join(lines)
+
+        if subcommand == "runs":
+            items = self._session_db.list_autonomy_runs(limit=10)
+            if not items:
+                return "No autonomy runs have been recorded yet."
+            lines = ["Recent autonomy runs:"]
+            for item in items:
+                lines.append(
+                    f"- [{item['status']}] {item['run_type']} #{item['id']}: {item.get('summary') or 'no summary'}"
+                )
+            return "\n".join(lines)
+
+        if subcommand not in {"status", ""}:
+            return "Usage: /autonomy [status|pause|resume|inbox|watch|drafts|runs]"
+
+        home_text = (
+            f"{home_source.platform.value}:{home_source.chat_id}"
+            + (f":{home_source.thread_id}" if home_source and home_source.thread_id else "")
+            if home_source else "not configured"
+        )
+        return (
+            "Autonomy status:\n"
+            f"- Enabled: {'yes' if self.config.autonomy.enabled else 'no'}\n"
+            f"- Paused: {'yes' if bool(state.get('paused')) else 'no'}\n"
+            f"- Home: {home_text}\n"
+            f"- Pending inbox: {counts['pending_inbox']}\n"
+            f"- Active watch items: {counts['active_watch_items']}\n"
+            f"- Draft artifacts: {counts['draft_artifacts']}\n"
+            f"- Current revision: {int(state.get('current_revision') or 0)}"
         )
     
     @staticmethod
@@ -4811,6 +5816,7 @@ class GatewayRunner:
             text=continuation_text,
             source=source,
             message_id=f"approve-continuation-{uuid.uuid4().hex}",
+            skip_autonomy_intake=True,
         )
 
         async def _continue_agent():
@@ -5055,10 +6061,21 @@ class GatewayRunner:
             os.environ["HERMES_SESSION_CHAT_NAME"] = context.source.chat_name
         if context.source.thread_id:
             os.environ["HERMES_SESSION_THREAD_ID"] = str(context.source.thread_id)
+        os.environ["HERMES_AUTONOMY_ENABLED"] = "1" if self._autonomy_runtime_enabled() else "0"
+        os.environ["HERMES_AUTONOMY_INTERVAL_SECONDS"] = str(max(0, int(self.config.autonomy.interval_seconds or 0)))
+        os.environ["HERMES_AUTONOMY_EXTRACT_BEHAVIOR"] = self._autonomy_extract_behavior()
     
     def _clear_session_env(self) -> None:
         """Clear session environment variables."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID"]:
+        for var in [
+            "HERMES_SESSION_PLATFORM",
+            "HERMES_SESSION_CHAT_ID",
+            "HERMES_SESSION_CHAT_NAME",
+            "HERMES_SESSION_THREAD_ID",
+            "HERMES_AUTONOMY_ENABLED",
+            "HERMES_AUTONOMY_INTERVAL_SECONDS",
+            "HERMES_AUTONOMY_EXTRACT_BEHAVIOR",
+        ]:
             if var in os.environ:
                 del os.environ[var]
     
@@ -5367,6 +6384,7 @@ class GatewayRunner:
         session_key: str = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
+        persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -5829,7 +6847,12 @@ class GatewayRunner:
                             if _p:
                                 _history_media_paths.add(_p)
             
-            result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+            result = agent.run_conversation(
+                message,
+                conversation_history=agent_history,
+                task_id=session_id,
+                persist_user_message=persist_user_message,
+            )
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done

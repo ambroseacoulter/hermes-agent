@@ -342,6 +342,11 @@ class MessageEvent:
     
     # Auto-loaded skill for topic/channel bindings (e.g., Telegram DM Topics)
     auto_skill: Optional[str] = None
+
+    # Internal control flags
+    # skip_autonomy_intake prevents synthetic/internal gateway turns from being
+    # re-ingested by the autonomy intake pass as if they were fresh user turns.
+    skip_autonomy_intake: bool = False
     
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)

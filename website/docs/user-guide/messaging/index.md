@@ -6,7 +6,7 @@ description: "Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, 
 
 # Messaging Gateway
 
-Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Feishu/Lark, WeCom, or your browser. The gateway is a single background process that connects to all your configured platforms, handles sessions, runs cron jobs, and delivers voice messages.
+Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Feishu/Lark, WeCom, or your browser. The gateway is a single background process that connects to all your configured platforms, handles sessions, runs cron jobs, runs the profile autonomy loop, and delivers voice messages.
 
 For the full voice feature set — including CLI microphone mode, spoken replies in messaging, and Discord voice-channel conversations — see [Voice Mode](/docs/user-guide/features/voice-mode) and [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes).
 
@@ -56,6 +56,7 @@ flowchart TB
         store["Session store<br/>per chat"]
         agent["AIAgent<br/>run_agent.py"]
         cron["Cron scheduler<br/>ticks every 60s"]
+        autonomy["Autonomy runtime<br/>intake + supervisor + outbox"]
     end
 
     tg --> store
@@ -73,9 +74,11 @@ flowchart TB
     wh --> store
     store --> agent
     cron --> store
+    autonomy --> store
+    autonomy --> agent
 ```
 
-Each platform adapter receives messages, routes them through a per-chat session store, and dispatches them to the AIAgent for processing. The gateway also runs the cron scheduler, ticking every 60 seconds to execute any due jobs.
+Each platform adapter receives messages, routes them through a per-chat session store, and dispatches them to the AIAgent for processing. The gateway also runs the cron scheduler and the profile-scoped autonomy runtime.
 
 ## Quick Setup
 
@@ -115,6 +118,7 @@ hermes gateway status --system         # Linux only: inspect the system service 
 | `/approve` | Approve a pending dangerous command |
 | `/deny` | Reject a pending dangerous command |
 | `/sethome` | Set this chat as the home channel |
+| `/autonomy [status\|pause\|resume\|inbox\|watch\|drafts\|runs]` | Inspect or control the gateway autonomy loop |
 | `/compress` | Manually compress conversation context |
 | `/title [name]` | Set or show the session title |
 | `/resume [name]` | Resume a previously named session |
@@ -130,6 +134,20 @@ hermes gateway status --system         # Linux only: inspect the system service 
 | `/<skill-name>` | Invoke any installed skill |
 
 ## Session Management
+
+### Home chat and proactive delivery
+
+The gateway can use one chat or thread as the profile’s **home** target. That home target is used for:
+
+- cron deliveries
+- cross-platform delivery routing
+- autonomy proactive messages and approvals
+
+Set it from chat with `/sethome`, or configure it directly in `config.yaml`.
+
+Autonomy watch registration is also profile-configurable. You can let Hermes register explicit watches immediately, rely on hidden post-turn extraction, or use a hybrid mode that does both without duplicating the same watch twice.
+
+See [Autonomy](/docs/user-guide/features/autonomy) for how proactive delivery works.
 
 ### Session Persistence
 

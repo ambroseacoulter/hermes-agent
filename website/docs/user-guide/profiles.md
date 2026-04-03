@@ -4,11 +4,11 @@ sidebar_position: 2
 
 # Profiles: Running Multiple Agents
 
-Run multiple independent Hermes agents on the same machine — each with its own config, API keys, memory, sessions, skills, and gateway.
+Run multiple independent Hermes agents on the same machine — each with its own config, API keys, memory, sessions, skills, gateway, and autonomy state.
 
 ## What are profiles?
 
-A profile is a fully isolated Hermes environment. Each profile gets its own directory containing its own `config.yaml`, `.env`, `SOUL.md`, memories, sessions, skills, cron jobs, and state database. Profiles let you run separate agents for different purposes — a coding assistant, a personal bot, a research agent — without any cross-contamination.
+A profile is a fully isolated Hermes environment. Each profile gets its own directory containing its own `config.yaml`, `.env`, `SOUL.md`, memories, sessions, skills, cron jobs, autonomy state, and state database. Profiles let you run separate agents for different purposes — a coding assistant, a personal bot, a research agent — without any cross-contamination.
 
 When you create a profile, it automatically becomes its own command. Create a profile called `coder` and you immediately have `coder chat`, `coder setup`, `coder gateway start`, etc.
 
@@ -109,6 +109,8 @@ coder gateway start           # starts coder's gateway
 assistant gateway start       # starts assistant's gateway (separate process)
 ```
 
+When autonomy is enabled, it is also profile-scoped. Each gateway process keeps its own watch list, autonomy inbox, drafts, and proactive home-channel routing inside that profile's `HERMES_HOME`.
+
 ### Different bot tokens
 
 Each profile has its own `.env` file. Configure a different Telegram/Discord/Slack bot token in each:
@@ -141,6 +143,8 @@ Each profile has its own:
 - **`config.yaml`** — model, provider, toolsets, all settings
 - **`.env`** — API keys, bot tokens
 - **`SOUL.md`** — personality and instructions
+
+That includes autonomy settings such as the home chat, allowed autonomy toolsets, quiet hours, and retention/pruning behavior.
 
 ```bash
 coder config set model.model anthropic/claude-sonnet-4

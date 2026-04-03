@@ -518,8 +518,36 @@ DEFAULT_CONFIG = {
         "wrap_response": True,
     },
 
+    # Gateway-only autonomy loop (profile-scoped proactive monitoring)
+    "autonomy": {
+        "enabled": False,
+        "interval_seconds": 1800,
+        "poll_interval_seconds": 15,
+        "max_iterations": 8,
+        "max_recent_messages": 10,
+        "home_platform": "",
+        "home_chat_id": "",
+        "home_thread_id": "",
+        "home_chat_type": "",
+        "allowed_toolsets": ["search", "web", "session_search", "cron_read"],
+        "infer_level": "implied",
+        "extract_behavior": "both",  # hermes | auto_extract | both
+        "proactivity_level": "utility",
+        "social_rate_limit_hours": 24,
+        "resolved_retention_days": 45,
+        "inject_on_change_only": True,
+        "new_session_injection": "important_only",
+        "allow_drafts": True,
+        "allow_final_external_actions": False,
+        "quiet_hours": {
+            "enabled": False,
+            "start": "22:00",
+            "end": "08:00",
+        },
+    },
+
     # Config schema version - bump this when adding new required fields
-    "_config_version": 11,
+    "_config_version": 12,
 }
 
 # =============================================================================
@@ -535,6 +563,7 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
     10: ["TAVILY_API_KEY"],
     11: ["TERMINAL_MODAL_MODE"],
+    12: [],
 }
 
 # Required environment variables with metadata for migration prompts.

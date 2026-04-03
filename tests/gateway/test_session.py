@@ -862,6 +862,77 @@ class TestLastPromptTokens:
         )
 
 
+class TestAutonomySessionState:
+    def test_session_entry_roundtrip_preserves_autonomy_fields(self):
+        from gateway.session import SessionEntry
+        from datetime import datetime
+
+        now = datetime.now()
+        entry = SessionEntry(
+            session_key="test",
+            session_id="s1",
+            created_at=now,
+            updated_at=now,
+            last_autonomy_revision_seen=7,
+            last_autonomy_push_at=now,
+        )
+
+        restored = SessionEntry.from_dict(entry.to_dict())
+
+        assert restored.last_autonomy_revision_seen == 7
+        assert restored.last_autonomy_push_at == now
+
+    def test_mark_autonomy_revision_seen_advances_only_forward(self, tmp_path):
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._loaded = True
+        store._db = None
+        store._save = MagicMock()
+
+        from gateway.session import SessionEntry
+        from datetime import datetime
+
+        entry = SessionEntry(
+            session_key="k1",
+            session_id="s1",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            last_autonomy_revision_seen=2,
+        )
+        store._entries = {"k1": entry}
+
+        store.mark_autonomy_revision_seen("k1", 5)
+        store.mark_autonomy_revision_seen("k1", 3)
+
+        assert entry.last_autonomy_revision_seen == 5
+
+    def test_mark_autonomy_push_sets_timestamp_and_revision(self, tmp_path):
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._loaded = True
+        store._db = None
+        store._save = MagicMock()
+
+        from gateway.session import SessionEntry
+        from datetime import datetime
+
+        now = datetime.now()
+        entry = SessionEntry(
+            session_key="k1",
+            session_id="s1",
+            created_at=now,
+            updated_at=now,
+        )
+        store._entries = {"k1": entry}
+
+        store.mark_autonomy_push("k1", pushed_at=now, revision=9)
+
+        assert entry.last_autonomy_push_at == now
+        assert entry.last_autonomy_revision_seen == 9
+
+
 class TestRewriteTranscriptPreservesReasoning:
     """rewrite_transcript must not drop reasoning fields from SQLite."""
 

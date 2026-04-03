@@ -24,6 +24,7 @@ import json
 import asyncio
 import logging
 import threading
+import os
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import registry
@@ -146,6 +147,8 @@ def _discover_tools():
         "tools.skill_manager_tool",
         "tools.browser_tool",
         "tools.cronjob_tools",
+        "tools.cron_inspect_tool",
+        "tools.autonomy_watch_tool",
         "tools.rl_training_tool",
         "tools.tts_tool",
         "tools.todo_tool",
@@ -215,6 +218,8 @@ _LEGACY_TOOLSET_MAP = {
         "browser_vision", "browser_console"
     ],
     "cronjob_tools": ["cronjob"],
+    "cron_read_tools": ["cron_inspect"],
+    "autonomy_tools": ["autonomy_watch"],
     "rl_tools": [
         "rl_list_environments", "rl_select_environment",
         "rl_get_current_config", "rl_edit_config",
@@ -340,6 +345,62 @@ def get_tool_definitions(
                     }
                     break
 
+    if os.getenv("HERMES_AUTONOMY_ENABLED") == "1":
+        extract_behavior = (
+            str(os.getenv("HERMES_AUTONOMY_EXTRACT_BEHAVIOR", "both") or "both")
+            .strip()
+            .lower()
+        )
+        for i, td in enumerate(filtered_tools):
+            fn = td.get("function", {}).get("name")
+            desc = td.get("function", {}).get("description", "")
+            if fn == "cronjob":
+                if extract_behavior == "auto_extract":
+                    extra = (
+                        " When profile autonomy is enabled, do not use cron for open-ended monitoring or "
+                        "'keep an eye on X' requests. A hidden post-turn autonomy extractor handles those. Use cron only "
+                        "when the user explicitly wants time-based scheduling, a fixed cadence, an exact reminder, or a recurring digest. "
+                        "If the request is ambiguous, pass rather than inventing a schedule, repeat count, or expiry window. "
+                        "Do not call cronjob(create) without a user-provided schedule just to probe or recover. "
+                        "If you need to check whether similar scheduled coverage already exists, inspect first with cron_inspect."
+                    )
+                else:
+                    extra = (
+                        " When profile autonomy is enabled, do not use cron for open-ended monitoring or "
+                        "'keep an eye on X' requests. Prefer autonomy_watch for those. Use cron only when the user explicitly wants time-based scheduling, "
+                        "a fixed cadence, an exact reminder, or a recurring digest. If the request is ambiguous, pass "
+                        "rather than inventing a schedule, repeat count, or expiry window. Do not call cronjob(create) without a user-provided schedule just to probe or recover. If you need to check whether "
+                        "similar scheduled coverage already exists, inspect first with cron_inspect."
+                    )
+                if extra.strip() not in desc:
+                    filtered_tools[i] = {
+                        "type": "function",
+                        "function": {**td["function"], "description": desc + extra},
+                    }
+            elif fn == "cron_inspect":
+                extra = (
+                    " Use this before cronjob when a monitoring or follow-up request might already be covered by an "
+                    "existing scheduled job. This is inspection only; it does not mutate cron state."
+                )
+                if extra.strip() not in desc:
+                    filtered_tools[i] = {
+                        "type": "function",
+                        "function": {**td["function"], "description": desc + extra},
+                    }
+            elif fn == "autonomy_watch":
+                extra = (
+                    " This is the preferred way to register open-ended monitoring when profile autonomy is enabled. "
+                    "Use it immediately for requests like 'keep an eye on X' when the user did not ask for a specific schedule. "
+                    "Do not call cronjob or monitoring skills first just to validate whether autonomy watching is possible."
+                    if extract_behavior in {"hermes", "both"}
+                    else " This tool is not intended to be used in the current autonomy extraction mode."
+                )
+                if extra.strip() not in desc:
+                    filtered_tools[i] = {
+                        "type": "function",
+                        "function": {**td["function"], "description": desc + extra},
+                    }
+
     if not quiet_mode:
         if filtered_tools:
             tool_names = [t["function"]["name"] for t in filtered_tools]
@@ -373,6 +434,7 @@ def handle_function_call(
     enabled_tools: Optional[List[str]] = None,
     honcho_manager: Optional[Any] = None,
     honcho_session_key: Optional[str] = None,
+    session_db: Optional[Any] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -419,6 +481,7 @@ def handle_function_call(
                 enabled_tools=sandbox_enabled,
                 honcho_manager=honcho_manager,
                 honcho_session_key=honcho_session_key,
+                session_db=session_db,
             )
         else:
             result = registry.dispatch(
@@ -427,6 +490,7 @@ def handle_function_call(
                 user_task=user_task,
                 honcho_manager=honcho_manager,
                 honcho_session_key=honcho_session_key,
+                session_db=session_db,
             )
 
         try:

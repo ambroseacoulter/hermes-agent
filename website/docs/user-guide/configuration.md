@@ -362,6 +362,101 @@ memory:
   user_char_limit: 1375     # ~500 tokens
 ```
 
+## Autonomy Configuration
+
+Autonomy adds profile-scoped proactive behavior to the messaging gateway. It extracts watch items from normal conversations, revisits them in the background, and can proactively surface useful updates back into the configured home chat.
+
+:::info
+Autonomy runs only when Hermes is running through the gateway. CLI-only sessions stay purely reactive.
+:::
+
+Example:
+
+```yaml
+autonomy:
+  enabled: true
+  interval_seconds: 120
+  poll_interval_seconds: 10
+  max_iterations: 6
+  max_recent_messages: 8
+
+  home_platform: telegram
+  home_chat_id: "123456789"
+  home_thread_id: ""
+  home_chat_type: dm
+
+  infer_level: implied
+  extract_behavior: both
+  proactivity_level: utility
+  social_rate_limit_hours: 24
+  resolved_retention_days: 45
+
+  inject_on_change_only: true
+  new_session_injection: important_only
+
+  allow_drafts: true
+  allow_final_external_actions: false
+
+  allowed_toolsets:
+    - search
+    - web
+    - session_search
+    - cron_read
+
+  quiet_hours:
+    enabled: false
+    start: "22:00"
+    end: "08:00"
+```
+
+### Autonomy options
+
+| Option | Description |
+|--------|-------------|
+| `enabled` | Turns gateway autonomy on or off for the active profile. |
+| `interval_seconds` | How often the autonomy supervisor loop runs. |
+| `poll_interval_seconds` | How often the outbox checker wakes up to decide whether pending items should be surfaced now. |
+| `max_iterations` | Maximum internal tool/model steps a single supervisor run can take. |
+| `max_recent_messages` | Number of recent conversation messages intake/supervision can inspect for context. |
+| `home_platform` | Platform name for proactive delivery, such as `telegram`, `discord`, or `slack`. |
+| `home_chat_id` | Chat or channel ID for proactive delivery. |
+| `home_thread_id` | Optional thread or topic ID inside the home chat. |
+| `home_chat_type` | Optional hint like `dm`, `group`, or `thread` used to describe the home target. |
+| `allowed_toolsets` | Which toolsets the autonomy supervisor may use while researching or drafting. Keep this small and explicit. |
+| `infer_level` | How aggressively Hermes should infer new watch items. Use `explicit`, `implied`, or `aggressive`. |
+| `extract_behavior` | Controls how new watch items are registered. Use `hermes`, `auto_extract`, or `both`. |
+| `proactivity_level` | Controls whether Hermes is allowed to surface `utility`, `social`, or `both` kinds of proactive messages. |
+| `social_rate_limit_hours` | Minimum spacing between unsolicited social nudges when social proactivity is enabled. |
+| `resolved_retention_days` | How long resolved watch items and related autonomy state are retained before pruning. |
+| `inject_on_change_only` | If `true`, Hermes injects hidden autonomy deltas into normal user turns only when something has changed. |
+| `new_session_injection` | Controls whether a fresh session receives hidden autonomy context automatically. Use `none` or `important_only`. |
+| `allow_drafts` | Allows autonomy to stage drafts such as draft emails or follow-up messages. |
+| `allow_final_external_actions` | Allows autonomy to take final external actions directly. Recommended to keep `false`. |
+| `quiet_hours.enabled` | Enables quiet-hours suppression for non-urgent proactive delivery. |
+| `quiet_hours.start` | Quiet-hours start time in `HH:MM`. |
+| `quiet_hours.end` | Quiet-hours end time in `HH:MM`. |
+
+### Choosing the right defaults
+
+Recommended v1 defaults:
+
+- `infer_level: implied`
+- `extract_behavior: both`
+- `proactivity_level: utility`
+- `allow_drafts: true`
+- `allow_final_external_actions: false`
+- `inject_on_change_only: true`
+
+### `extract_behavior` modes
+
+- `hermes`: explicit open-ended monitoring requests are registered directly by Hermes during the user-facing turn. Post-turn extraction does not run.
+- `auto_extract`: Hermes can acknowledge the request naturally and rely on the hidden post-turn extractor to register the watch after the turn.
+- `both`: Hermes can register explicit watches immediately, and the post-turn extractor remains available as a fallback for implied or missed watch items.
+
+For local testing, use a shorter `interval_seconds` and `poll_interval_seconds`, and leave `quiet_hours.enabled: false` until you are happy with the behavior.
+
+See [Autonomy](/docs/user-guide/features/autonomy) for the end-user model and [Messaging](/docs/user-guide/messaging) for home chat setup.
+
 ## File Read Safety
 
 Controls how much content a single `read_file` call can return. Reads that exceed the limit are rejected with an error telling the agent to use `offset` and `limit` for a smaller range. This prevents a single read of a minified JS bundle or large data file from flooding the context window.

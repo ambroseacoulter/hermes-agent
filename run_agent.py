@@ -5658,6 +5658,7 @@ class AIAgent:
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 honcho_manager=self._honcho,
                 honcho_session_key=self._honcho_session_key,
+                session_db=self._session_db,
             )
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -6045,6 +6046,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        session_db=self._session_db,
                     )
                     _spinner_result = function_result
                 except Exception as tool_error:
@@ -6064,6 +6066,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        session_db=self._session_db,
                     )
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
