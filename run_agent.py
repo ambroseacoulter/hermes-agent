@@ -77,7 +77,7 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 # Agent internals extracted to agent/ package for modularity
 from agent.prompt_builder import (
-    DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
+    DEFAULT_AGENT_IDENTITY, IMMUTABLE_SOUL_CORE_PROMPT, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
     build_nous_subscription_prompt,
 )
@@ -90,6 +90,8 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE
+from agent.child_mode_guidance import build_child_mode_guidance
+from gateway.hatch import build_hatch_mode_guidance
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -997,6 +999,8 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        self._kid_mode_guidance = build_child_mode_guidance(_agent_cfg)
+        self._hatch_mode_guidance = build_hatch_mode_guidance(_agent_cfg)
 
         # Persistent memory (MEMORY.md + USER.md) -- loaded from disk
         self._memory_store = None
@@ -2413,38 +2417,22 @@ class AIAgent:
         is stable across all turns in a session, maximizing prefix cache hits.
         """
         # Layers (in order):
-        #   1. Agent identity — SOUL.md when available, else DEFAULT_AGENT_IDENTITY
-        #   2. User / gateway system prompt (if provided)
-        #   3. Persistent memory (frozen snapshot)
-        #   4. Skills guidance (if skills tools are loaded)
-        #   5. Context files (AGENTS.md, .cursorrules — SOUL.md excluded here when used as identity)
-        #   6. Current date & time (frozen at build time)
-        #   7. Platform-specific formatting hint
+        #   1. Hardcoded identity + immutable soul core
+        #   2. Mutable SOUL.md sections when available
+        #   3. User / gateway system prompt (if provided)
+        #   4. Persistent memory (frozen snapshot)
+        #   5. Skills guidance (if skills tools are loaded)
+        #   6. Context files (AGENTS.md, .cursorrules — SOUL.md excluded here when used as identity)
+        #   7. Current date & time (frozen at build time)
+        #   8. Platform-specific formatting hint
 
-        # Try SOUL.md as primary identity (unless context files are skipped)
-        _soul_loaded = False
+        prompt_parts = [DEFAULT_AGENT_IDENTITY, IMMUTABLE_SOUL_CORE_PROMPT]
+
+        # Load mutable SOUL.md identity sections when available
         if not self.skip_context_files:
             _soul_content = load_soul_md()
             if _soul_content:
-                prompt_parts = [_soul_content]
-                _soul_loaded = True
-
-        if not _soul_loaded:
-            # Fallback to hardcoded identity
-            _ai_peer_name = (
-                None
-                if False
-                else None
-            )
-            if _ai_peer_name:
-                _identity = DEFAULT_AGENT_IDENTITY.replace(
-                    "You are Hermes Agent",
-                    f"You are {_ai_peer_name}",
-                    1,
-                )
-            else:
-                _identity = DEFAULT_AGENT_IDENTITY
-            prompt_parts = [_identity]
+                prompt_parts.append(_soul_content)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
@@ -2488,6 +2476,12 @@ class AIAgent:
                 _model_lower = (self.model or "").lower()
                 if "gemini" in _model_lower or "gemma" in _model_lower:
                     prompt_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+
+        if self._kid_mode_guidance:
+            prompt_parts.append(self._kid_mode_guidance)
+
+        if self._hatch_mode_guidance:
+            prompt_parts.append(self._hatch_mode_guidance)
 
         # so it can refer the user to them rather than reinventing answers.
 
@@ -2541,7 +2535,7 @@ class AIAgent:
             # other dev files — inflating token usage by ~10k for no benefit.
             _context_cwd = os.getenv("TERMINAL_CWD") or None
             context_files_prompt = build_context_files_prompt(
-                cwd=_context_cwd, skip_soul=_soul_loaded)
+                cwd=_context_cwd, skip_soul=True)
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 

@@ -10,6 +10,8 @@ times per reply. (Regression test for #160)
 import pytest
 import re
 
+from gateway.platforms.base import BasePlatformAdapter
+
 
 def extract_media_tags_fixed(result_messages, history_len):
     """
@@ -178,6 +180,18 @@ class TestMediaExtraction:
         seen = set()
         unique = [t for t in tags if t not in seen and not seen.add(t)]
         assert len(unique) == 2  # After dedup: same.ogg and different.ogg
+
+    def test_local_image_attachment_suppresses_remote_images(self):
+        assert BasePlatformAdapter._has_local_image_attachment(
+            media_files=[("/tmp/hermes-avatar.png", False)],
+            local_files=[],
+        ) is True
+
+    def test_non_image_media_does_not_trigger_remote_image_suppression(self):
+        assert BasePlatformAdapter._has_local_image_attachment(
+            media_files=[("/tmp/voice-note.m4a", True)],
+            local_files=["/tmp/readme.pdf"],
+        ) is False
 
 
 if __name__ == "__main__":

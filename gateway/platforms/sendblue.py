@@ -8,9 +8,12 @@ receiver for inbound messages, media, and typing indicator events.
 from __future__ import annotations
 
 import asyncio
+import base64
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -212,6 +215,123 @@ def strip_sendblue_markdown(content: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _normalize_sendblue_inbound_text(text: str, *, media_present: bool) -> str:
+    value = (text or "").strip()
+    if not value or not media_present:
+        return value
+
+    # Sendblue voice/image messages often include placeholder markdown like
+    # ![Audio Message]() alongside the real media payload. Drop that so Hermes
+    # only sees the actual media/transcript, not the placeholder string.
+    stripped = re.sub(r"!\[[^\]]*\]\(\s*\)", "", value).strip()
+    if not stripped:
+        return ""
+    return stripped
+
+
+def _has_ffmpeg() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def _convert_audio_to_caf(audio_path: str) -> Optional[str]:
+    source = Path(audio_path)
+    if source.suffix.lower() == ".caf":
+        return str(source)
+    if not _has_ffmpeg():
+        logger.warning("[sendblue] ffmpeg not available; falling back to raw audio upload for %s", audio_path)
+        return None
+
+    target = source.with_suffix(".caf")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(source),
+                "-acodec",
+                "libopus",
+                "-ac",
+                "1",
+                "-b:a",
+                "24k",
+                str(target),
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("[sendblue] Failed to convert %s to .caf: %s", audio_path, exc)
+        return None
+
+    if result.returncode != 0 or not target.exists() or target.stat().st_size <= 0:
+        details = result.stderr.decode("utf-8", errors="ignore")[:200]
+        logger.warning("[sendblue] ffmpeg .caf conversion failed for %s: %s", audio_path, details)
+        return None
+    return str(target)
+
+
+def _escape_vcard_text(value: str) -> str:
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace(";", r"\;")
+        .replace(",", r"\,")
+        .replace("\n", r"\n")
+    )
+
+
+def _fold_vcard_line(prefix: str, value: str, chunk_size: int = 72) -> str:
+    chunks = [value[i:i + chunk_size] for i in range(0, len(value), chunk_size)] or [""]
+    first, *rest = chunks
+    lines = [f"{prefix}{first}"]
+    lines.extend(f" {chunk}" for chunk in rest)
+    return "\n".join(lines)
+
+
+def build_sendblue_contact_card(
+    *,
+    assistant_name: str,
+    phone_number: str,
+    avatar_path: Optional[str] = None,
+) -> Optional[str]:
+    assistant_name = str(assistant_name or "").strip()
+    phone_number = str(phone_number or "").strip()
+    if not assistant_name or not phone_number:
+        return None
+
+    from hermes_constants import get_hermes_home
+
+    first_name, _, last_name = assistant_name.partition(" ")
+    safe_slug = re.sub(r"[^a-z0-9]+", "-", assistant_name.lower()).strip("-") or "hermes-contact"
+    target = get_hermes_home() / "contacts" / f"{safe_slug}.vcf"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        f"N:{_escape_vcard_text(last_name)};{_escape_vcard_text(first_name)};;;",
+        f"FN:{_escape_vcard_text(assistant_name)}",
+        f"TEL;TYPE=CELL:{phone_number}",
+    ]
+
+    avatar = Path(avatar_path).expanduser() if avatar_path else None
+    if avatar and avatar.exists() and avatar.is_file():
+        image_type = "PNG" if avatar.suffix.lower() == ".png" else "JPEG"
+        encoded = base64.b64encode(avatar.read_bytes()).decode("ascii")
+        lines.append(_fold_vcard_line(f"PHOTO;ENCODING=b;TYPE={image_type}:", encoded))
+
+    lines.append("END:VCARD")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return str(target.resolve())
 
 
 def _normalize_secret(value: Any) -> str:
@@ -612,11 +732,28 @@ class SendblueAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
-        ok, media_url, body = await upload_sendblue_file(self.settings, audio_path, client=self._http_client)
-        if not ok or not media_url:
-            message = body.get("message") or body.get("error_message") or str(body)
-            return SendResult(success=False, error=f"Sendblue upload failed: {message}", raw_response=body)
-        return await sendblue_send_message(self.settings, chat_id, caption or "", media_url=media_url, client=self._http_client)
+        converted_path = _convert_audio_to_caf(audio_path)
+        upload_path = converted_path or audio_path
+        try:
+            ok, media_url, body = await upload_sendblue_file(self.settings, upload_path, client=self._http_client)
+            if not ok or not media_url:
+                message = body.get("message") or body.get("error_message") or str(body)
+                return SendResult(success=False, error=f"Sendblue upload failed: {message}", raw_response=body)
+            return await sendblue_send_message(self.settings, chat_id, caption or "", media_url=media_url, client=self._http_client)
+        finally:
+            if converted_path and converted_path != audio_path:
+                try:
+                    Path(converted_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    async def play_tts(
+        self,
+        chat_id: str,
+        audio_path: str,
+        **kwargs,
+    ) -> SendResult:
+        return await self.send_voice(chat_id=chat_id, audio_path=audio_path, **kwargs)
 
     async def send_video(
         self,
@@ -767,6 +904,7 @@ class SendblueAdapter(BasePlatformAdapter):
             media_urls.append(cached_path)
             media_types.append(media_type)
             message_type = detected_type
+            text = _normalize_sendblue_inbound_text(text, media_present=True)
         elif text:
             message_type = MessageType.TEXT
 

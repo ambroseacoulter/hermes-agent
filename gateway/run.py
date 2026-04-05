@@ -223,6 +223,16 @@ from gateway.session import (
     build_session_context_prompt,
     build_session_key,
 )
+from gateway.hatch import (
+    HATCH_KICKOFF_MESSAGE,
+    HATCH_RESUME_MESSAGE,
+    HatchStore,
+    build_hatch_sendblue_contact_card,
+    describe_hatch_status,
+    ensure_hatch_soul_template,
+    profile_is_hatchable,
+    sync_hatch_completion,
+)
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
 
@@ -551,11 +561,121 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        self._hatch_store = HatchStore()
 
 
 
 
     # -- Setup skill availability ----------------------------------------
+
+    def _get_hatch_store(self) -> HatchStore:
+        store = getattr(self, "_hatch_store", None)
+        if store is None:
+            store = HatchStore()
+            self._hatch_store = store
+        return store
+
+    async def _run_hatch_turn(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        kickoff_message: str,
+        kickoff_note: str,
+    ) -> Optional[str]:
+        source = event.source
+        original_text = event.text
+        event.text = kickoff_message
+        event._hatch_kickoff_note = kickoff_note
+
+        self._running_agents[session_key] = _AGENT_PENDING_SENTINEL
+        self._running_agents_ts[session_key] = time.time()
+        try:
+            return await self._handle_message_with_agent(event, source, session_key)
+        finally:
+            event.text = original_text
+            if hasattr(event, "_hatch_kickoff_note"):
+                delattr(event, "_hatch_kickoff_note")
+            if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
+                del self._running_agents[session_key]
+            self._running_agents_ts.pop(session_key, None)
+
+    def _reset_session_after_hatch_completion(self, source: SessionSource, session_key: str) -> None:
+        self._evict_cached_agent(session_key)
+        try:
+            self.session_store.reset_session(session_key)
+        except Exception:
+            logger.debug("Could not reset session after hatch completion", exc_info=True)
+        try:
+            self.session_store.get_or_create_session(source, force_new=True)
+        except Exception:
+            logger.debug("Could not prime a fresh session after hatch completion", exc_info=True)
+
+    async def _handle_hatch_command(self, event: MessageEvent, session_key: str) -> str:
+        store = self._get_hatch_store()
+        sync_result = sync_hatch_completion(store=store, session_key=session_key)
+        state = sync_result["state"]
+
+        raw_args = event.get_command_args().strip().lower()
+        subcommand = raw_args.split()[0] if raw_args else ""
+
+        if subcommand == "status":
+            return describe_hatch_status(store)
+
+        if subcommand == "cancel":
+            if state.get("status") == "active":
+                store.cancel()
+                self._evict_cached_agent(session_key)
+                return "Hatch cancelled. Send /hatch whenever you want to start again."
+            return "There isn't an active hatch to cancel."
+
+        if state.get("status") == "completed":
+            finished = state.get("completed_at") or "earlier"
+            return (
+                f"Hermes already hatched for this profile on {finished}. "
+                "This setup only runs once."
+            )
+
+        if subcommand == "restart":
+            ensure_hatch_soul_template(force=True)
+            store.start(session_key, force=True)
+            self._evict_cached_agent(session_key)
+            try:
+                self.session_store.get_or_create_session(event.source)
+            except Exception:
+                pass
+            try:
+                self.session_store.reset_session(session_key)
+            except Exception:
+                pass
+            return await self._run_hatch_turn(
+                event,
+                session_key,
+                HATCH_KICKOFF_MESSAGE,
+                "[System note: The user explicitly restarted hatch mode. Begin the hatch process now, naturally and conversationally, asking only the next best question.]",
+            )
+
+        allowed, message = profile_is_hatchable(store)
+        if not allowed:
+            return message
+
+        ensure_hatch_soul_template(force=False)
+        store.start(session_key, force=state.get("status") != "active")
+        self._evict_cached_agent(session_key)
+        try:
+            self.session_store.get_or_create_session(event.source)
+        except Exception:
+            pass
+        try:
+            self.session_store.reset_session(session_key)
+        except Exception:
+            pass
+
+        kickoff_message = HATCH_RESUME_MESSAGE if state.get("status") == "active" else HATCH_KICKOFF_MESSAGE
+        kickoff_note = (
+            "[System note: The user invoked /hatch. Begin or continue the one-time hatch process now. "
+            "Keep it fluid, ask only the next best question, and finish the profile naturally.]"
+        )
+        return await self._run_hatch_turn(event, session_key, kickoff_message, kickoff_note)
 
     def _has_setup_skill(self) -> bool:
         """Check if the hermes-agent-setup skill is installed."""
@@ -1819,6 +1939,18 @@ class GatewayRunner:
                     del self._running_agents[_quick_key]
                 return await self._handle_reset_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name == "hatch":
+                running_agent = self._running_agents.get(_quick_key)
+                if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+                    running_agent.interrupt("Hatch requested")
+                adapter = self.adapters.get(source.platform)
+                if adapter and hasattr(adapter, 'get_pending_message'):
+                    adapter.get_pending_message(_quick_key)
+                self._pending_messages.pop(_quick_key, None)
+                if _quick_key in self._running_agents:
+                    del self._running_agents[_quick_key]
+                return await self._handle_hatch_command(event, _quick_key)
+
             # /queue <prompt> — queue without interrupting
             if event.get_command() in ("queue", "q"):
                 queued_text = event.get_command_args().strip()
@@ -1999,6 +2131,9 @@ class GatewayRunner:
         if canonical == "resume":
             return await self._handle_resume_command(event)
 
+        if canonical == "hatch":
+            return await self._handle_hatch_command(event, _quick_key)
+
         if canonical == "branch":
             return await self._handle_branch_command(event)
 
@@ -2138,6 +2273,7 @@ class GatewayRunner:
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+        hatch_was_active = self._get_hatch_store().is_active()
         
         # Emit session:start for new or auto-reset sessions
         _is_new_session = (
@@ -2228,6 +2364,10 @@ class GatewayRunner:
 
             session_entry.was_auto_reset = False
             session_entry.auto_reset_reason = None
+
+        _hatch_kickoff_note = getattr(event, "_hatch_kickoff_note", "")
+        if _hatch_kickoff_note:
+            context_prompt = f"{context_prompt}\n\n{_hatch_kickoff_note}".strip()
 
         # Auto-load skill for DM topic bindings (e.g., Telegram Private Chat Topics)
         # Only inject on NEW sessions — for ongoing conversations the skill content
@@ -2764,6 +2904,40 @@ class GatewayRunner:
                         display_reasoning = last_reasoning.strip()
                     response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
+            hatch_completed_this_turn = False
+            if hatch_was_active:
+                _hatch_sync = sync_hatch_completion(
+                    store=self._get_hatch_store(),
+                    session_key=session_key,
+                )
+                if _hatch_sync.get("completed"):
+                    hatch_completed_this_turn = True
+                    _hatch_avatar_path = (_hatch_sync.get("avatar_path") or "").strip()
+                    _completion_media_paths: list[str] = []
+                    if _hatch_avatar_path and f"MEDIA:{_hatch_avatar_path}" not in (response or ""):
+                        _completion_media_paths.append(_hatch_avatar_path)
+                    if event.source.platform == Platform.SENDBLUE:
+                        try:
+                            from gateway.platforms.sendblue import get_sendblue_settings
+
+                            _sb_settings = get_sendblue_settings(self.config.platforms.get(Platform.SENDBLUE))
+                            _contact_card_path = build_hatch_sendblue_contact_card(
+                                phone_number=_sb_settings.from_number,
+                                avatar_path=_hatch_avatar_path,
+                            )
+                            if _contact_card_path and f"MEDIA:{_contact_card_path}" not in (response or ""):
+                                _completion_media_paths.append(_contact_card_path)
+                        except Exception as _sendblue_card_err:
+                            logger.warning("Failed to build Sendblue hatch contact card: %s", _sendblue_card_err)
+
+                    if _completion_media_paths:
+                        _completion_media_tags = "\n".join(f"MEDIA:{path}" for path in _completion_media_paths)
+                        response = (
+                            f"{(response or '').rstrip()}\n\n{_completion_media_tags}".strip()
+                            if response
+                            else _completion_media_tags
+                        )
+
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
@@ -2888,8 +3062,12 @@ class GatewayRunner:
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
                         )
+                if hatch_completed_this_turn:
+                    self._reset_session_after_hatch_completion(source, session_key)
                 return None
 
+            if hatch_completed_this_turn:
+                self._reset_session_after_hatch_completion(source, session_key)
             return response
             
         except Exception as e:

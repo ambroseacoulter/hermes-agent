@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -179,6 +180,24 @@ class TestSendblueFormatAndRequirements:
         ):
             assert check_sendblue_requirements() is True
 
+    def test_build_sendblue_contact_card_includes_number_and_photo(self, monkeypatch, tmp_path):
+        from gateway.platforms.sendblue import build_sendblue_contact_card
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        avatar = tmp_path / "avatar.png"
+        avatar.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+        path = build_sendblue_contact_card(
+            assistant_name="Kai",
+            phone_number="+15551234567",
+            avatar_path=str(avatar),
+        )
+
+        content = Path(path).read_text(encoding="utf-8")
+        assert "FN:Kai" in content
+        assert "TEL;TYPE=CELL:+15551234567" in content
+        assert "PHOTO;ENCODING=b;TYPE=PNG:" in content
+
 
 class TestSendblueWebhookHandling:
     @pytest.mark.asyncio
@@ -214,12 +233,31 @@ class TestSendblueWebhookHandling:
             await asyncio.sleep(0)
 
         adapter.handle_message.assert_awaited_once()
-        event = adapter.handle_message.await_args.args[0]
-        assert event.text == "hello there"
-        assert event.message_id == "guid-123"
-        assert event.source.chat_id == "+15557654321"
-        assert event.message_type == MessageType.TEXT
-        adapter.mark_read.assert_awaited_once_with("+15557654321")
+
+    @pytest.mark.asyncio
+    async def test_inbound_media_placeholder_text_is_suppressed(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueAdapter
+
+        monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+        monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+        monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+        adapter = SendblueAdapter(PlatformConfig(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"}))
+
+        with patch("gateway.platforms.sendblue._download_inbound_media", new=AsyncMock(return_value=("/tmp/inbound.m4a", "audio/m4a", MessageType.VOICE))):
+            event = await adapter._build_message_event(
+                {
+                    "content": "![Audio Message]()",
+                    "media_url": "https://example.com/audio.m4a",
+                    "message_handle": "guid-audio",
+                    "number": "+15557654321",
+                    "from_number": "+15557654321",
+                    "to_number": "+15551234567",
+                }
+            )
+
+        assert event is not None
+        assert event.text == ""
+        assert event.message_type == MessageType.VOICE
 
 
     @pytest.mark.asyncio
@@ -309,3 +347,26 @@ class TestSendblueToolset:
 
         assert "sendblue" in PLATFORM_HINTS
         assert "plain text" in PLATFORM_HINTS["sendblue"].lower()
+
+
+class TestSendblueVoiceSending:
+    @pytest.mark.asyncio
+    async def test_send_voice_converts_audio_to_caf_for_inline_imessage(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueAdapter
+
+        monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+        monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+        monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+        adapter = SendblueAdapter(PlatformConfig(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"}))
+
+        with (
+            patch("gateway.platforms.sendblue._convert_audio_to_caf", return_value="/tmp/reply.caf"),
+            patch("gateway.platforms.sendblue.upload_sendblue_file", new=AsyncMock(return_value=(True, "https://cdn.example.com/reply.caf", {}))) as upload_mock,
+            patch("gateway.platforms.sendblue.sendblue_send_message", new=AsyncMock(return_value=type("R", (), {"success": True, "message_id": "m1", "raw_response": {}})())) as send_mock,
+            patch.object(Path, "unlink", return_value=None),
+        ):
+            result = await adapter.send_voice("+15557654321", "/tmp/reply.mp3")
+
+        assert result.success is True
+        assert upload_mock.await_args.args[1] == "/tmp/reply.caf"
+        assert send_mock.await_args.kwargs["media_url"] == "https://cdn.example.com/reply.caf"

@@ -19,6 +19,7 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
+    load_soul_md,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -479,7 +480,9 @@ class TestBuildContextFilesPrompt:
         with patch("pathlib.Path.home", return_value=fake_home):
             result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Project Context" in result
-        assert "Hermes Agent" in result
+        assert "choose your own name" in result
+        assert "<facts>" in result
+        assert "<chat-style>" not in result
 
     def test_loads_agents_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Use Ruff for linting.")
@@ -519,6 +522,42 @@ class TestBuildContextFilesPrompt:
         (hermes_home / "SOUL.md").write_text("\n\n", encoding="utf-8")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert result == ""
+
+    def test_load_soul_md_only_injects_mutable_sections_from_legacy_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        (hermes_home / "SOUL.md").write_text(
+            """<overview>
+Immutable core text.
+</overview>
+
+<facts>
+- **Name:** Nova
+</facts>
+
+<appearance>
+Bright and toy-like.
+</appearance>
+
+<personality>
+- Curious
+</personality>
+
+<chat-style>
+- Legacy fixed rules
+</chat-style>
+""",
+            encoding="utf-8",
+        )
+
+        result = load_soul_md()
+
+        assert "<facts>" in result
+        assert "<appearance>" in result
+        assert "<personality>" in result
+        assert "<overview>" not in result
+        assert "<chat-style>" not in result
 
     def test_blocks_injection_in_agents_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text(

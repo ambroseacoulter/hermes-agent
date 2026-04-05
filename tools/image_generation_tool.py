@@ -23,20 +23,23 @@ Usage:
     # Generate and automatically upscale an image
     result = await image_generate_tool(
         prompt="A serene mountain landscape with cherry blossoms",
-        image_size="landscape_4_3",
+        aspect_ratio="landscape_4_3",
         num_images=1
     )
 """
 
+import base64
 import json
 import logging
 import os
 import datetime
 import threading
 import uuid
+from pathlib import Path
 from typing import Dict, Any, Optional, Union
 from urllib.parse import urlencode
 import fal_client
+import httpx
 from tools.debug_helpers import DebugSession
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled
@@ -44,7 +47,7 @@ from tools.tool_backend_helpers import managed_nous_tools_enabled
 logger = logging.getLogger(__name__)
 
 # Configuration for image generation
-DEFAULT_MODEL = "fal-ai/flux-2-pro"
+DEFAULT_MODEL = "fal-ai/nano-banana-2"
 DEFAULT_ASPECT_RATIO = "landscape"
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 4.5
@@ -55,13 +58,21 @@ DEFAULT_OUTPUT_FORMAT = "png"
 ENABLE_SAFETY_CHECKER = False
 SAFETY_TOLERANCE = "5"  # Maximum tolerance (1-5, where 5 is most permissive)
 
-# Aspect ratio mapping - simplified choices for model to select
+# Aspect ratio mapping for fal-ai/nano-banana-2.
+# The model expects literal ratios like "3:4" and "16:9", so we keep the
+# existing Hermes-friendly aliases but translate them to Fal's official schema.
 ASPECT_RATIO_MAP = {
-    "landscape": "landscape_16_9",
-    "square": "square_hd",
-    "portrait": "portrait_16_9"
+    "landscape": "16:9",
+    "landscape_16_9": "16:9",
+    "landscape_4_3": "4:3",
+    "square": "1:1",
+    "square_hd": "1:1",
+    "portrait": "9:16",
+    "portrait_16_9": "9:16",
+    "portrait_4_3": "3:4",
 }
 VALID_ASPECT_RATIOS = list(ASPECT_RATIO_MAP.keys())
+VALID_FAL_ASPECT_RATIOS = sorted(set(ASPECT_RATIO_MAP.values()))
 
 # Configuration for automatic upscaling
 UPSCALER_MODEL = "fal-ai/clarity-upscaler"
@@ -74,10 +85,7 @@ UPSCALER_RESEMBLANCE = 0.6
 UPSCALER_GUIDANCE_SCALE = 4
 UPSCALER_NUM_INFERENCE_STEPS = 18
 
-# Valid parameter values for validation based on FLUX 2 Pro documentation
-VALID_IMAGE_SIZES = [
-    "square_hd", "square", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9"
-]
+# Valid parameter values for validation based on Nano Banana documentation
 VALID_OUTPUT_FORMATS = ["jpeg", "png"]
 VALID_ACCELERATION_MODES = ["none", "regular", "high"]
 
@@ -216,7 +224,7 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
 
 
 def _validate_parameters(
-    image_size: Union[str, Dict[str, int]], 
+    aspect_ratio: str,
     num_inference_steps: int,
     guidance_scale: float,
     num_images: int,
@@ -224,10 +232,10 @@ def _validate_parameters(
     acceleration: str = "none"
 ) -> Dict[str, Any]:
     """
-    Validate and normalize image generation parameters for FLUX 2 Pro model.
+    Validate and normalize image generation parameters for the Nano Banana model.
     
     Args:
-        image_size: Either a preset string or custom size dict
+        aspect_ratio: Fal-native aspect ratio string like "3:4"
         num_inference_steps: Number of inference steps
         guidance_scale: Guidance scale value
         num_images: Number of images to generate
@@ -242,23 +250,9 @@ def _validate_parameters(
     """
     validated = {}
     
-    # Validate image_size
-    if isinstance(image_size, str):
-        if image_size not in VALID_IMAGE_SIZES:
-            raise ValueError(f"Invalid image_size '{image_size}'. Must be one of: {VALID_IMAGE_SIZES}")
-        validated["image_size"] = image_size
-    elif isinstance(image_size, dict):
-        if "width" not in image_size or "height" not in image_size:
-            raise ValueError("Custom image_size must contain 'width' and 'height' keys")
-        if not isinstance(image_size["width"], int) or not isinstance(image_size["height"], int):
-            raise ValueError("Custom image_size width and height must be integers")
-        if image_size["width"] < 64 or image_size["height"] < 64:
-            raise ValueError("Custom image_size dimensions must be at least 64x64")
-        if image_size["width"] > 2048 or image_size["height"] > 2048:
-            raise ValueError("Custom image_size dimensions must not exceed 2048x2048")
-        validated["image_size"] = image_size
-    else:
-        raise ValueError("image_size must be either a preset string or a dict with width/height")
+    if aspect_ratio not in VALID_FAL_ASPECT_RATIOS:
+        raise ValueError(f"Invalid aspect_ratio '{aspect_ratio}'. Must be one of: {VALID_FAL_ASPECT_RATIOS}")
+    validated["aspect_ratio"] = aspect_ratio
     
     # Validate num_inference_steps
     if not isinstance(num_inference_steps, int) or num_inference_steps < 1 or num_inference_steps > 100:
@@ -349,6 +343,34 @@ def _upscale_image(image_url: str, original_prompt: str) -> Dict[str, Any]:
         return None
 
 
+def _save_generated_image(image_url: str, output_path: str) -> str:
+    """Persist a generated image URL or data URI to a local file path."""
+    target = Path(output_path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if image_url.startswith("data:"):
+        try:
+            _, payload = image_url.split(",", 1)
+        except ValueError as exc:
+            raise ValueError("Invalid data URI returned from image generation") from exc
+
+        try:
+            target.write_bytes(base64.b64decode(payload, validate=True))
+        except Exception as exc:
+            raise ValueError("Could not decode image data URI returned from image generation") from exc
+    else:
+        with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+            response = client.get(image_url)
+            response.raise_for_status()
+            target.write_bytes(response.content)
+
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return str(target.resolve())
+
+
 def image_generate_tool(
     prompt: str,
     aspect_ratio: str = DEFAULT_ASPECT_RATIO,
@@ -356,10 +378,12 @@ def image_generate_tool(
     guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
     num_images: int = DEFAULT_NUM_IMAGES,
     output_format: str = DEFAULT_OUTPUT_FORMAT,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    upscale: bool = True,
+    output_path: Optional[str] = None,
 ) -> str:
     """
-    Generate images from text prompts using FAL.ai's FLUX 2 Pro model with automatic upscaling.
+    Generate images from text prompts using FAL.ai's Nano Banana model with automatic upscaling.
     
     Uses the synchronous fal_client API to avoid event loop lifecycle issues.
     The async API's global httpx.AsyncClient (cached via @cached_property) breaks
@@ -368,37 +392,38 @@ def image_generate_tool(
     
     Args:
         prompt (str): The text prompt describing the desired image
-        aspect_ratio (str): Image aspect ratio - "landscape", "square", or "portrait" (default: "landscape")
+        aspect_ratio (str): Image aspect ratio or exact preset (default: "landscape")
         num_inference_steps (int): Number of denoising steps (1-50, default: 50)
         guidance_scale (float): How closely to follow prompt (0.1-20.0, default: 4.5)
         num_images (int): Number of images to generate (1-4, default: 1)
         output_format (str): Image format "jpeg" or "png" (default: "png")
         seed (Optional[int]): Random seed for reproducible results (optional)
+        upscale (bool): Apply the automatic 2x upscaler (default: True)
+        output_path (Optional[str]): Optional local file path to save the first image to
     
     Returns:
         str: JSON string containing minimal generation results:
-             {
-                 "success": bool,
-                 "image": str or None  # URL of the upscaled image, or None if failed
-             }
+             {"success": bool, "image": str or None, "saved_path": str or None}
     """
-    # Validate and map aspect_ratio to actual image_size
+    # Validate and map the Hermes-facing alias to the model-native aspect ratio
     aspect_ratio_lower = aspect_ratio.lower().strip() if aspect_ratio else DEFAULT_ASPECT_RATIO
     if aspect_ratio_lower not in ASPECT_RATIO_MAP:
         logger.warning("Invalid aspect_ratio '%s', defaulting to '%s'", aspect_ratio, DEFAULT_ASPECT_RATIO)
         aspect_ratio_lower = DEFAULT_ASPECT_RATIO
-    image_size = ASPECT_RATIO_MAP[aspect_ratio_lower]
+    fal_aspect_ratio = ASPECT_RATIO_MAP[aspect_ratio_lower]
     
     debug_call_data = {
         "parameters": {
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
-            "image_size": image_size,
+            "fal_aspect_ratio": fal_aspect_ratio,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "num_images": num_images,
             "output_format": output_format,
-            "seed": seed
+            "seed": seed,
+            "upscale": upscale,
+            "output_path": output_path,
         },
         "error": None,
         "success": False,
@@ -409,7 +434,7 @@ def image_generate_tool(
     start_time = datetime.datetime.now()
     
     try:
-        logger.info("Generating %s image(s) with FLUX 2 Pro: %s", num_images, prompt[:80])
+        logger.info("Generating %s image(s) with %s: %s", num_images, DEFAULT_MODEL, prompt[:80])
         
         # Validate prompt
         if not prompt or not isinstance(prompt, str) or len(prompt.strip()) == 0:
@@ -424,29 +449,28 @@ def image_generate_tool(
         
         # Validate other parameters
         validated_params = _validate_parameters(
-            image_size, num_inference_steps, guidance_scale, num_images, output_format, "none"
+            fal_aspect_ratio, num_inference_steps, guidance_scale, num_images, output_format, "none"
         )
         
-        # Prepare arguments for FAL.ai FLUX 2 Pro API
+        # Prepare arguments for FAL.ai Nano Banana API
         arguments = {
             "prompt": prompt.strip(),
-            "image_size": validated_params["image_size"],
+            "aspect_ratio": validated_params["aspect_ratio"],
             "num_inference_steps": validated_params["num_inference_steps"],
             "guidance_scale": validated_params["guidance_scale"],
             "num_images": validated_params["num_images"],
             "output_format": validated_params["output_format"],
             "enable_safety_checker": ENABLE_SAFETY_CHECKER,
             "safety_tolerance": SAFETY_TOLERANCE,
-            "sync_mode": True  # Use sync mode for immediate results
         }
         
         # Add seed if provided
         if seed is not None and isinstance(seed, int):
             arguments["seed"] = seed
         
-        logger.info("Submitting generation request to FAL.ai FLUX 2 Pro...")
+        logger.info("Submitting generation request to FAL.ai %s...", DEFAULT_MODEL)
         logger.info("  Model: %s", DEFAULT_MODEL)
-        logger.info("  Aspect Ratio: %s -> %s", aspect_ratio_lower, image_size)
+        logger.info("  Aspect Ratio: %s -> %s", aspect_ratio_lower, fal_aspect_ratio)
         logger.info("  Steps: %s", validated_params['num_inference_steps'])
         logger.info("  Guidance: %s", validated_params['guidance_scale'])
         
@@ -479,15 +503,19 @@ def image_generate_tool(
                     "height": img.get("height", 0)
                 }
                 
-                # Attempt to upscale the image
-                upscaled_image = _upscale_image(img["url"], prompt.strip())
-                
-                if upscaled_image:
-                    # Use upscaled image if successful
-                    formatted_images.append(upscaled_image)
+                if upscale:
+                    # Attempt to upscale the image
+                    upscaled_image = _upscale_image(img["url"], prompt.strip())
+
+                    if upscaled_image:
+                        # Use upscaled image if successful
+                        formatted_images.append(upscaled_image)
+                    else:
+                        # Fall back to original image if upscaling fails
+                        logger.warning("Using original image as fallback")
+                        original_image["upscaled"] = False
+                        formatted_images.append(original_image)
                 else:
-                    # Fall back to original image if upscaling fails
-                    logger.warning("Using original image as fallback")
                     original_image["upscaled"] = False
                     formatted_images.append(original_image)
         
@@ -500,8 +528,15 @@ def image_generate_tool(
         # Prepare successful response - minimal format
         response_data = {
             "success": True,
-            "image": formatted_images[0]["url"] if formatted_images else None
+            "image": formatted_images[0]["url"] if formatted_images else None,
+            "saved_path": None,
         }
+
+        if output_path and formatted_images:
+            response_data["saved_path"] = _save_generated_image(
+                formatted_images[0]["url"],
+                output_path,
+            )
         
         debug_call_data["success"] = True
         debug_call_data["images_generated"] = len(formatted_images)
@@ -620,16 +655,15 @@ if __name__ == "__main__":
     print("      # Generate image with automatic 2x upscaling")
     print("      result = await image_generate_tool(")
     print("          prompt='A serene mountain landscape with cherry blossoms',")
-    print("          image_size='landscape_4_3',")
+    print("          aspect_ratio='landscape_4_3',")
     print("          num_images=1")
     print("      )")
     print("      print(result)")
     print("  asyncio.run(main())")
     
-    print("\nSupported image sizes:")
-    for size in VALID_IMAGE_SIZES:
+    print("\nSupported aspect ratios:")
+    for size in VALID_ASPECT_RATIOS:
         print(f"  - {size}")
-    print("  - Custom: {'width': 512, 'height': 768} (if needed)")
     
     print("\nAcceleration modes:")
     for mode in VALID_ACCELERATION_MODES:
@@ -656,7 +690,7 @@ from tools.registry import registry
 
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
-    "description": "Generate high-quality images from text prompts using FLUX 2 Pro model with automatic 2x upscaling. Creates detailed, artistic images that are automatically upscaled for hi-rez results. Returns a single upscaled image URL. Display it using markdown: ![description](URL)",
+    "description": "Generate high-quality images from text prompts using nano-banana-2. Supports simple aspect aliases plus exact 4:3 and 16:9 portrait/landscape presets. Returns a single image URL. Display it using markdown: ![description](URL)",
     "parameters": {
         "type": "object",
         "properties": {
@@ -666,9 +700,18 @@ IMAGE_GENERATE_SCHEMA = {
             },
             "aspect_ratio": {
                 "type": "string",
-                "enum": ["landscape", "square", "portrait"],
-                "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
+                "enum": ["landscape", "landscape_4_3", "landscape_16_9", "square", "square_hd", "portrait", "portrait_4_3", "portrait_16_9"],
+                "description": "The aspect ratio alias to use. Use portrait_4_3 for a 3:4 portrait avatar.",
                 "default": "landscape"
+            },
+            "upscale": {
+                "type": "boolean",
+                "description": "When true (default), apply the automatic 2x clarity upscaler. Set false when you want the original render without post-upscaling.",
+                "default": True,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional local file path to save the generated image to. Use an absolute path when you want a file you can later send with MEDIA:<path>.",
             }
         },
         "required": ["prompt"]
@@ -688,6 +731,8 @@ def _handle_image_generate(args, **kw):
         num_images=1,
         output_format="png",
         seed=None,
+        upscale=bool(args.get("upscale", True)),
+        output_path=args.get("output_path"),
     )
 
 

@@ -875,6 +875,20 @@ class BasePlatformAdapter(ABC):
 
         return paths, cleaned
 
+    @staticmethod
+    def _has_local_image_attachment(
+        media_files: List[Tuple[str, bool]],
+        local_files: List[str],
+    ) -> bool:
+        image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+        for media_path, _is_voice in media_files:
+            if Path(media_path).suffix.lower() in image_exts:
+                return True
+        for file_path in local_files:
+            if Path(file_path).suffix.lower() in image_exts:
+                return True
+        return False
+
     async def _keep_typing(self, chat_id: str, interval: float = 2.0, metadata=None) -> None:
         """
         Continuously send typing indicator until cancelled.
@@ -1165,6 +1179,13 @@ class BasePlatformAdapter(ABC):
                 local_files, text_content = self.extract_local_files(text_content)
                 if local_files:
                     logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
+                if images and self._has_local_image_attachment(media_files, local_files):
+                    logger.info(
+                        "[%s] Suppressing %d remote image attachment(s) because local image media is present",
+                        self.name,
+                        len(images),
+                    )
+                    images = []
                 
                 # Auto-TTS: if voice message, generate audio FIRST (before sending text)
                 # Skipped when the chat has voice mode disabled (/voice off)

@@ -80,6 +80,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
                args_hint="[name]"),
+    CommandDef("hatch", "Run the one-time AI Self setup flow", "Session",
+               gateway_only=True, args_hint="[restart|cancel|status]"),
 
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
