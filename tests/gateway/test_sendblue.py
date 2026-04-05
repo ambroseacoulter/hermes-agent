@@ -198,6 +198,67 @@ class TestSendblueFormatAndRequirements:
         assert "TEL;TYPE=CELL:+15551234567" in content
         assert "PHOTO;ENCODING=b;TYPE=PNG:" in content
 
+    @pytest.mark.asyncio
+    async def test_sendblue_email_target_uses_direct_message_endpoint(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueSettings, sendblue_send_message
+
+        captured = {}
+
+        async def fake_request_json(method, path, settings, payload=None, client=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["payload"] = payload or {}
+            return 200, {"message_handle": "msg-1"}
+
+        monkeypatch.setattr("gateway.platforms.sendblue._request_json", fake_request_json)
+
+        result = await sendblue_send_message(
+            SendblueSettings(
+                api_key="key",
+                api_secret="secret",
+                from_number="+15551234567",
+            ),
+            "user@icloud.com",
+            "hello",
+        )
+
+        assert result.success is True
+        assert captured["path"] == "/api/send-message"
+        assert captured["payload"]["number"] == "user@icloud.com"
+
+    def test_inbound_email_handle_is_treated_as_dm(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueAdapter
+
+        monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+        monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+        monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+
+        adapter = SendblueAdapter(
+            PlatformConfig(
+                enabled=True,
+                api_key="key",
+                extra={"api_secret": "secret", "from_number": "+15551234567"},
+            )
+        )
+
+        event = asyncio.run(
+            adapter._build_message_event(
+                {
+                    "content": "hello there",
+                    "message_handle": "guid-123",
+                    "number": "user@icloud.com",
+                    "from_number": "user@icloud.com",
+                    "to_number": "+15551234567",
+                    "service": "iMessage",
+                }
+            )
+        )
+
+        assert event is not None
+        assert event.source.chat_type == "dm"
+        assert event.source.chat_id == "user@icloud.com"
+        assert event.source.user_id == "user@icloud.com"
+
 
 class TestSendblueWebhookHandling:
     @pytest.mark.asyncio

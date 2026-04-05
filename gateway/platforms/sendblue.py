@@ -56,6 +56,7 @@ MAX_MESSAGE_LENGTH = 4000
 MAX_BODY_BYTES = 1_048_576
 
 _PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
 _VIDEO_EXTS = {".mp4", ".mov", ".m4v"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a", ".aac", ".caf"}
@@ -192,13 +193,25 @@ def check_sendblue_requirements(config: Optional[PlatformConfig] = None) -> bool
 def _redact_phone(phone: str) -> str:
     if not phone:
         return "<none>"
+    if _EMAIL_RE.fullmatch(phone):
+        local, _, domain = phone.partition("@")
+        if len(local) <= 2:
+            redacted_local = local[:1] + "***"
+        else:
+            redacted_local = local[:2] + "***"
+        return f"{redacted_local}@{domain}"
     if len(phone) <= 8:
         return phone[:2] + "***" + phone[-2:] if len(phone) > 4 else "****"
     return phone[:5] + "***" + phone[-4:]
 
 
 def _is_group_chat_id(chat_id: str) -> bool:
-    return not bool(_PHONE_RE.fullmatch((chat_id or "").strip()))
+    candidate = (chat_id or "").strip()
+    if _PHONE_RE.fullmatch(candidate):
+        return False
+    if _EMAIL_RE.fullmatch(candidate):
+        return False
+    return True
 
 
 def strip_sendblue_markdown(content: str) -> str:
@@ -215,6 +228,21 @@ def strip_sendblue_markdown(content: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _extract_sendblue_email(payload: dict[str, Any]) -> str:
+    """Best-effort extraction of an iMessage email handle from a webhook payload.
+
+    Sendblue's public webhook examples are phone-centric, but some iMessage
+    conversations may surface an email-style handle. Prefer explicit sender
+    handle fields when present, while avoiding accountEmail (the account
+    owner's address, not the end user).
+    """
+    for key in ("handle", "email", "sender_email", "contact_email", "imessage_email", "address"):
+        value = str(payload.get(key) or "").strip()
+        if _EMAIL_RE.fullmatch(value):
+            return value
+    return ""
 
 
 def _normalize_sendblue_inbound_text(text: str, *, media_present: bool) -> str:
@@ -522,7 +550,8 @@ async def sendblue_send_message(
     if not text and not media_url:
         return SendResult(success=False, error="Sendblue requires content or media")
 
-    is_group = _is_group_chat_id(str(chat_id))
+    recipient = str(chat_id).strip()
+    is_group = _is_group_chat_id(recipient)
     path = "/api/send-group-message" if is_group else "/api/send-message"
     payload: dict[str, Any] = {"from_number": settings.from_number}
     if text:
@@ -532,9 +561,9 @@ async def sendblue_send_message(
     if settings.status_callback_url and not is_group:
         payload["status_callback"] = settings.status_callback_url
     if is_group:
-        payload["group_id"] = str(chat_id)
+        payload["group_id"] = recipient
     else:
-        payload["number"] = str(chat_id)
+        payload["number"] = recipient
 
     status, body = await _request_json("POST", path, settings, payload=payload, client=client)
     if status >= 400 or body.get("status") == "ERROR":
@@ -674,7 +703,7 @@ class SendblueAdapter(BasePlatformAdapter):
         return await sendblue_send_message(self.settings, chat_id, content, client=self._http_client)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        if _is_group_chat_id(chat_id):
+        if _is_group_chat_id(chat_id) or not _PHONE_RE.fullmatch((chat_id or "").strip()):
             return
         result = await sendblue_send_typing_indicator(self.settings, chat_id, client=self._http_client)
         if not result.success:
@@ -776,6 +805,8 @@ class SendblueAdapter(BasePlatformAdapter):
         return strip_sendblue_markdown(content)
 
     async def mark_read(self, number: str) -> SendResult:
+        if not _PHONE_RE.fullmatch((number or "").strip()):
+            return SendResult(success=False, error="Sendblue mark-read currently requires a phone-number chat")
         return await sendblue_mark_read(self.settings, number, client=self._http_client)
 
     async def add_reaction(self, message_handle: str, reaction: str, part_index: int = 0) -> SendResult:
@@ -885,15 +916,17 @@ class SendblueAdapter(BasePlatformAdapter):
         message_handle = str(payload.get("message_handle") or "").strip()
         group_id = str(payload.get("group_id") or "").strip()
         sender_number = str(payload.get("number") or payload.get("from_number") or "").strip()
+        sender_email = _extract_sendblue_email(payload)
+        sender_identifier = sender_number or sender_email
         sendblue_number = str(payload.get("to_number") or payload.get("sendblue_number") or self.settings.from_number or "").strip()
 
-        if not sender_number and not group_id:
+        if not sender_identifier and not group_id:
             return None
 
-        chat_id = group_id or sender_number
+        chat_id = group_id or sender_identifier
         chat_type = "group" if group_id else "dm"
         chat_name = str(payload.get("group_display_name") or chat_id)
-        user_id = sender_number or chat_id
+        user_id = sender_identifier or chat_id
         user_name = user_id
 
         media_urls: list[str] = []
@@ -914,6 +947,7 @@ class SendblueAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=user_id,
             user_name=user_name,
+            user_id_alt=sender_email if sender_email and sender_email != user_id else None,
         )
         timestamp = _parse_timestamp(payload.get("date_sent") or payload.get("date_updated"))
         event = MessageEvent(
@@ -929,7 +963,7 @@ class SendblueAdapter(BasePlatformAdapter):
         remember_recent_inbound(chat_id, message_handle or event.message_id or "", payload)
         logger.info(
             "[sendblue] inbound %s -> %s (%s): %s",
-            _redact_phone(sender_number),
+            _redact_phone(sender_identifier),
             _redact_phone(sendblue_number),
             chat_type,
             (text or media_url)[:80],

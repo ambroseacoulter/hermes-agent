@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _PHONE_TARGET_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+_EMAIL_TARGET_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp"}
@@ -43,7 +44,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567', 'sendblue:+15551234567'"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or Telegram topic 'telegram:chat_id:thread_id'. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:#bot-home', 'slack:#engineering', 'signal:+15551234567', 'sendblue:+15551234567', 'sendblue:user@icloud.com'"
             },
             "message": {
                 "type": "string",
@@ -210,6 +211,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     if platform_name in {"signal", "sms", "sendblue"} and _PHONE_TARGET_RE.fullmatch(target_ref):
+        return target_ref, None, True
+    if platform_name == "sendblue" and _EMAIL_TARGET_RE.fullmatch(target_ref):
         return target_ref, None, True
     return None, None, False
 

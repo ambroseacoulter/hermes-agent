@@ -271,6 +271,37 @@ class TestSendMessageTool:
             thread_id=None,
             media_files=[],
         )
+
+    def test_sendblue_email_target_is_explicit(self):
+        config = SimpleNamespace(
+            platforms={Platform.SENDBLUE: SimpleNamespace(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"})},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "sendblue:user@icloud.com",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.SENDBLUE,
+            config.platforms[Platform.SENDBLUE],
+            "user@icloud.com",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
 class TestSendTelegramMediaDelivery:
     def test_sends_text_then_photo_for_media_tag(self, tmp_path, monkeypatch):
         image_path = tmp_path / "photo.png"
