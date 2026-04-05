@@ -164,6 +164,13 @@ class TestExtractImages:
         assert images == []
         assert "![doc]" in cleaned  # Should be preserved
 
+    def test_empty_markdown_image_placeholder_removed(self):
+        content = "Before\n\n![avatar]()\n\nAfter"
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert images == []
+        assert "![avatar]()" not in cleaned
+        assert cleaned == "Before\n\nAfter"
+
     def test_html_img_tag(self):
         content = 'Check this: <img src="https://example.com/photo.png">'
         images, cleaned = BasePlatformAdapter.extract_images(content)

@@ -642,6 +642,7 @@ class BasePlatformAdapter(ABC):
         """
         images = []
         cleaned = content
+        empty_md_pattern = r'!\[[^\]]*\]\(\s*\)'
         
         # Match markdown images: ![alt](url)
         md_pattern = r'!\[([^\]]*)\]\((https?://[^\s\)]+)\)'
@@ -667,8 +668,12 @@ class BasePlatformAdapter(ABC):
                 return '' if url in extracted_urls else match.group(0)
             cleaned = re.sub(md_pattern, _remove_if_extracted, cleaned)
             cleaned = re.sub(html_pattern, _remove_if_extracted, cleaned)
-            # Clean up leftover blank lines
-            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+        # Drop empty markdown image placeholders such as ![avatar]().
+        cleaned = re.sub(rf'(?m)^[ \t]*{empty_md_pattern}[ \t]*\n?', '', cleaned)
+        cleaned = re.sub(empty_md_pattern, '', cleaned)
+        # Clean up leftover blank lines
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         
         return images, cleaned
     
