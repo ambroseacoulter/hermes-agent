@@ -1819,6 +1819,12 @@ def setup_gateway(config: dict):
     from hermes_cli.gateway import gateway_setup as run_gateway_setup
 
     run_gateway_setup()
+    # gateway_setup() persists directly to disk, so refresh the caller's
+    # in-memory config to avoid the outer setup wizard saving stale data
+    # back over the just-written messaging platform config.
+    refreshed = load_config()
+    config.clear()
+    config.update(refreshed)
     return
 
 

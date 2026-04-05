@@ -1788,14 +1788,26 @@ def _sanitize_env_lines(lines: list) -> list:
             continue
 
         # Detect concatenated KEY=VALUE pairs on one line.
-        # Search for known KEY= patterns at any position in the line.
-        split_positions = []
+        # Search for known KEY= patterns at any position in the line, but
+        # ignore nested matches where one key name is a suffix of another
+        # (for example WEBHOOK_PORT inside SENDBLUE_WEBHOOK_PORT).
+        matches = []
         for key_name in known_keys:
             needle = key_name + "="
             idx = stripped.find(needle)
             while idx >= 0:
-                split_positions.append(idx)
+                matches.append((idx, len(needle)))
                 idx = stripped.find(needle, idx + len(needle))
+
+        split_positions = []
+        if matches:
+            matches.sort(key=lambda item: (item[0], -item[1]))
+            protected_until = -1
+            for start, needle_len in matches:
+                if start < protected_until:
+                    continue
+                split_positions.append(start)
+                protected_until = start + needle_len
 
         if len(split_positions) > 1:
             split_positions.sort()

@@ -309,3 +309,11 @@ def test_sendblue_setup_flow_accepts_default_secret_header(monkeypatch):
     assert header_prompt[1] == "sb-signing-secret"
     assert saved["SENDBLUE_WEBHOOK_SECRET_HEADER"] == "sb-signing-secret"
     assert "SENDBLUE_WEBHOOK_SECRET" not in saved
+
+
+def test_sanitize_env_lines_does_not_split_sendblue_webhook_port():
+    from hermes_cli.config import _sanitize_env_lines
+
+    sanitized = _sanitize_env_lines(["SENDBLUE_WEBHOOK_PORT=8645\n"])
+
+    assert sanitized == ["SENDBLUE_WEBHOOK_PORT=8645\n"]

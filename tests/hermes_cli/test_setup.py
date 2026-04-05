@@ -238,6 +238,35 @@ def test_setup_gateway_delegates_to_gateway_subcommand(monkeypatch):
     assert calls == ["gateway"]
 
 
+def test_setup_gateway_refreshes_in_memory_config_after_gateway_subcommand(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config = {"model": {"provider": "openrouter"}}
+
+    def fake_gateway_setup():
+        save_config(
+            {
+                "model": {"provider": "openrouter"},
+                "platforms": {
+                    "sendblue": {
+                        "enabled": True,
+                        "api_key": "key",
+                        "extra": {
+                            "api_secret": "secret",
+                            "from_number": "+15551234567",
+                        },
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr("hermes_cli.gateway.gateway_setup", fake_gateway_setup)
+
+    setup_gateway(config)
+
+    assert config["platforms"]["sendblue"]["enabled"] is True
+
+
 def test_modal_setup_can_use_nous_subscription_without_modal_creds(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "1")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
