@@ -18,6 +18,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "SIGNAL_ALLOWED_USERS",
         "EMAIL_ALLOWED_USERS",
         "SMS_ALLOWED_USERS",
+        "SENDBLUE_ALLOWED_USERS",
         "MATTERMOST_ALLOWED_USERS",
         "MATRIX_ALLOWED_USERS",
         "DINGTALK_ALLOWED_USERS", "FEISHU_ALLOWED_USERS", "WECOM_ALLOWED_USERS",
@@ -29,6 +30,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "SIGNAL_ALLOW_ALL_USERS",
         "EMAIL_ALLOW_ALL_USERS",
         "SMS_ALLOW_ALL_USERS",
+        "SENDBLUE_ALLOW_ALL_USERS",
         "MATTERMOST_ALLOW_ALL_USERS",
         "MATRIX_ALLOW_ALL_USERS",
         "DINGTALK_ALLOW_ALL_USERS", "FEISHU_ALLOW_ALL_USERS", "WECOM_ALLOW_ALL_USERS",
@@ -181,6 +183,51 @@ async def test_unauthorized_whatsapp_dm_can_be_ignored(monkeypatch):
     assert result is None
     runner.pairing_store.generate_code.assert_not_called()
     adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_sendblue_dm_is_ignored_by_default(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    config = GatewayConfig(
+        platforms={
+            Platform.SENDBLUE: PlatformConfig(
+                enabled=True,
+                api_key="key",
+                extra={"api_secret": "secret", "from_number": "+15551234567"},
+            ),
+        },
+    )
+    runner, adapter = _make_runner(Platform.SENDBLUE, config)
+
+    result = await runner._handle_message(
+        _make_event(
+            Platform.SENDBLUE,
+            "+15557654321",
+            "+15557654321",
+        )
+    )
+
+    assert result is None
+    runner.pairing_store.generate_code.assert_not_called()
+    adapter.send.assert_not_awaited()
+
+
+def test_sendblue_can_still_explicitly_opt_back_into_pairing():
+    config = GatewayConfig(
+        platforms={
+            Platform.SENDBLUE: PlatformConfig(
+                enabled=True,
+                api_key="key",
+                extra={
+                    "api_secret": "secret",
+                    "from_number": "+15551234567",
+                    "unauthorized_dm_behavior": "pair",
+                },
+            ),
+        },
+    )
+
+    assert config.get_unauthorized_dm_behavior(Platform.SENDBLUE) == "pair"
 
 
 @pytest.mark.asyncio

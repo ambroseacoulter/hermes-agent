@@ -409,6 +409,11 @@ class GatewayConfig:
                     platform_cfg.extra.get("unauthorized_dm_behavior"),
                     self.unauthorized_dm_behavior,
                 )
+            if platform == Platform.SENDBLUE:
+                # Sendblue webhooks often fan out the same inbound SMS/iMessage
+                # to multiple Hermes instances. Default to silently ignoring
+                # unknown numbers so sibling gateways do not send pairing codes.
+                return "ignore"
         return self.unauthorized_dm_behavior
 
 
