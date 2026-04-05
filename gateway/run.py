@@ -612,14 +612,15 @@ class GatewayRunner:
 
     async def _handle_hatch_command(self, event: MessageEvent, session_key: str) -> str:
         store = self._get_hatch_store()
-        sync_result = sync_hatch_completion(store=store, session_key=session_key)
+        user_config = _load_gateway_config()
+        sync_result = sync_hatch_completion(store=store, session_key=session_key, config=user_config)
         state = sync_result["state"]
 
         raw_args = event.get_command_args().strip().lower()
         subcommand = raw_args.split()[0] if raw_args else ""
 
         if subcommand == "status":
-            return describe_hatch_status(store)
+            return describe_hatch_status(store, config=user_config)
 
         if subcommand == "cancel":
             if state.get("status") == "active":
@@ -654,7 +655,7 @@ class GatewayRunner:
                 "[System note: The user explicitly restarted hatch mode. Begin the hatch process now, naturally and conversationally, asking only the next best question.]",
             )
 
-        allowed, message = profile_is_hatchable(store)
+        allowed, message = profile_is_hatchable(store, config=user_config)
         if not allowed:
             return message
 
@@ -2910,9 +2911,11 @@ class GatewayRunner:
 
             hatch_completed_this_turn = False
             if hatch_was_active:
+                _user_config = _load_gateway_config()
                 _hatch_sync = sync_hatch_completion(
                     store=self._get_hatch_store(),
                     session_key=session_key,
+                    config=_user_config,
                 )
                 if _hatch_sync.get("completed"):
                     hatch_completed_this_turn = True

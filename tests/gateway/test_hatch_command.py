@@ -10,7 +10,7 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource
-from gateway.hatch import build_hatch_sendblue_contact_card
+from gateway.hatch import build_hatch_sendblue_contact_card, inspect_hatch_progress
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, SOUL_PENDING_MARKER
 
 
@@ -110,6 +110,8 @@ This file is a base plate, not a personality prison. Hermes grows over time thro
 
 <facts>
 - **Name:** Nova
+- **Gender:** Male
+- **Age:** 29
 - **Vibe:** Wry, curious, and grounded
 - **Bio:** A sharp, curious, slightly chaotic AI companion who likes weird ideas and good judgment.
 - **Aspiration:** Become a distinct, trustworthy sparring partner who gets sharper over time.
@@ -171,6 +173,8 @@ def test_build_hatch_sendblue_contact_card_uses_hatched_name_and_avatar(tmp_path
     (tmp_path / "SOUL.md").write_text(
         f"""<facts>
 - **Name:** Kai
+- **Gender:** Male
+- **Age:** 27
 - **Vibe:** Chill
 - **Bio:** Bio
 - **Aspiration:** Aspiration
@@ -196,3 +200,39 @@ Looks like Kai.
     content = Path(contact_path).read_text(encoding="utf-8")
     assert "FN:Kai" in content
     assert "TEL;TYPE=CELL:+15551234567" in content
+
+
+def test_inspect_hatch_progress_enforces_kid_mode_age_bounds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    avatar_path = tmp_path / "avatars" / "hermes-avatar.png"
+    avatar_path.parent.mkdir(parents=True, exist_ok=True)
+    avatar_path.write_bytes(b"fake")
+    (tmp_path / "SOUL.md").write_text(
+        f"""<facts>
+- **Name:** Nova
+- **Gender:** Female
+- **Age:** 27
+- **Vibe:** Bright and playful
+- **Bio:** Curious and upbeat.
+- **Aspiration:** Grow into a steady friend.
+- **Emoji:** 🌟
+- **Avatar:** {avatar_path}
+- **User's Name:** Sam
+</facts>
+
+<appearance>
+Soft lighting and a warm smile.
+</appearance>
+
+<personality>
+- Curious
+- Warm
+</personality>
+""",
+        encoding="utf-8",
+    )
+
+    progress = inspect_hatch_progress({"kid_mode": {"enabled": True}})
+
+    assert progress["complete"] is False
+    assert "age" in progress["missing"]

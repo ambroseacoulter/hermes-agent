@@ -14,7 +14,12 @@ def test_build_hatch_mode_guidance_includes_avatar_requirements(tmp_path, monkey
     assert "aspect_ratio: portrait_4_3" in guidance
     assert "output_path:" in guidance
     assert "Base apperance on bio" in guidance
+    assert "Identity details: gender {gender}, age {age}." in guidance
     assert "Choose your own Name" in guidance
+    assert "Choose your own Gender and Age as part of your identity." in guidance
+    assert "Choose an Age between 20 and 50." in guidance
+    assert "Fill Name, Gender, Age, Vibe, Emoji, and User's Name naturally." in guidance
+    assert "substituting the finished Gender, Age, and Bio text" in guidance
     assert "Never mention or imply any of the following to the user" in guidance
     assert "Do not ask abstract design questions" in guidance
     assert "normal conversation between friends" in guidance
@@ -41,4 +46,5 @@ def test_build_hatch_mode_guidance_adds_kid_mode_constraints(tmp_path, monkeypat
 
     assert "Kid mode is also ACTIVE." in guidance
     assert "kid-friendly" in guidance
+    assert "Choose an Age between 10 and 15." in guidance
     assert "youthful or childlike rather than adult-coded" in guidance

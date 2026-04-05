@@ -23,12 +23,28 @@ HATCH_KICKOFF_MESSAGE = "Let's hatch."
 HATCH_RESUME_MESSAGE = "Let's keep hatching."
 HATCH_AVATAR_FILENAME = "hermes-avatar.png"
 HATCH_AVATAR_PROMPT_TEMPLATE = (
-    "Style: 3D Pixar portrait"
-    " Bio: {bio}"
+    "Style: 3D render, stylized 3D character portrait, Pixar style, modern 3D animation, "
+    "smooth clay render, matte vinyl toy aesthetic, soft studio lighting, subsurface scattering, "
+    "Octane render, Blender, clean white background, ultra-detailed, 8k resolution. "
+    "Framing and presentation: perfectly centered portrait, direct gaze, face-to-face view, "
+    "shoulder-level composition, isolated on pure white, high-key lighting, minimalist background, "
+    "no text overlays. Identity details: gender {gender}, age {age}. Base apperance on bio: {bio}"
 )
 
 _HATCH_STATE_VERSION = 2
-_COMPLETE_FIELDS = ("name", "vibe", "bio", "aspiration", "emoji", "avatar", "user's name", "appearance", "personality")
+_COMPLETE_FIELDS = (
+    "name",
+    "gender",
+    "age",
+    "vibe",
+    "bio",
+    "aspiration",
+    "emoji",
+    "avatar",
+    "user's name",
+    "appearance",
+    "personality",
+)
 
 
 def _now_iso() -> str:
@@ -78,6 +94,24 @@ def _has_pending_marker(value: str) -> bool:
     return SOUL_PENDING_MARKER in (value or "")
 
 
+def _parse_age(value: str) -> int | None:
+    if not value or _has_pending_marker(value):
+        return None
+    match = re.search(r"\b(\d{1,3})\b", value)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _age_bounds(config: dict[str, Any] | None = None) -> tuple[int, int]:
+    if child_mode_enabled(config):
+        return (10, 15)
+    return (20, 50)
+
+
 def get_soul_path() -> Path:
     return get_hermes_home() / "SOUL.md"
 
@@ -119,7 +153,7 @@ def _resolve_avatar_path(value: str) -> Path:
     return get_hermes_home() / raw
 
 
-def inspect_hatch_progress() -> dict[str, Any]:
+def inspect_hatch_progress(config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Inspect SOUL/avatar state to see what remains for hatch."""
     soul_path = get_soul_path()
     content = _read_text(soul_path)
@@ -137,6 +171,8 @@ def inspect_hatch_progress() -> dict[str, Any]:
         }
 
     name = _extract_fact(content, "Name")
+    gender = _extract_first_fact(content, "Gender", "Gender Identity")
+    age_value = _extract_first_fact(content, "Age", "Apparent Age")
     vibe = _extract_fact(content, "Vibe")
     bio = _extract_fact(content, "Bio")
     aspiration = _extract_fact(content, "Aspiration")
@@ -148,6 +184,12 @@ def inspect_hatch_progress() -> dict[str, Any]:
 
     if not name or _has_pending_marker(name):
         missing.append("name")
+    if not gender or _has_pending_marker(gender):
+        missing.append("gender")
+    age = _parse_age(age_value)
+    min_age, max_age = _age_bounds(config)
+    if age is None or age < min_age or age > max_age:
+        missing.append("age")
     if not vibe or _has_pending_marker(vibe):
         missing.append("vibe")
     if not primary_user or _has_pending_marker(primary_user):
@@ -287,11 +329,15 @@ class HatchStore:
         return self.get_state().get("status") == "completed"
 
 
-def sync_hatch_completion(store: HatchStore | None = None, session_key: str | None = None) -> dict[str, Any]:
+def sync_hatch_completion(
+    store: HatchStore | None = None,
+    session_key: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Mark hatch complete if SOUL/avatar state shows it is done."""
     store = store or HatchStore()
     state = store.get_state()
-    progress = inspect_hatch_progress()
+    progress = inspect_hatch_progress(config=config)
     if state.get("status") == "completed":
         return {
             "completed": True,
@@ -315,17 +361,20 @@ def sync_hatch_completion(store: HatchStore | None = None, session_key: str | No
     }
 
 
-def profile_is_hatchable(store: HatchStore | None = None) -> tuple[bool, str]:
+def profile_is_hatchable(
+    store: HatchStore | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """Return whether /hatch can be started for this profile."""
     store = store or HatchStore()
-    sync_result = sync_hatch_completion(store=store)
+    sync_result = sync_hatch_completion(store=store, config=config)
     state = sync_result["state"]
     if state.get("status") == "completed":
         finished = state.get("completed_at") or "an earlier session"
         return False, f"Hermes already hatched for this profile on {finished}."
 
-    content = _read_text(get_soul_path())
-    if not content.strip() or _looks_like_seeded_soul(content) or SOUL_PENDING_MARKER in content:
+    progress = sync_result["progress"]
+    if not progress.get("complete"):
         return True, ""
 
     return (
@@ -334,9 +383,12 @@ def profile_is_hatchable(store: HatchStore | None = None) -> tuple[bool, str]:
     )
 
 
-def describe_hatch_status(store: HatchStore | None = None) -> str:
+def describe_hatch_status(
+    store: HatchStore | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
     store = store or HatchStore()
-    sync_result = sync_hatch_completion(store=store)
+    sync_result = sync_hatch_completion(store=store, config=config)
     state = sync_result["state"]
     progress = sync_result["progress"]
     missing = progress.get("missing", [])
@@ -354,7 +406,7 @@ def describe_hatch_status(store: HatchStore | None = None) -> str:
 def build_hatch_mode_guidance(config: dict[str, Any] | None = None) -> str:
     """Build a system-prompt overlay when hatch is active and incomplete."""
     store = HatchStore()
-    sync_result = sync_hatch_completion(store=store)
+    sync_result = sync_hatch_completion(store=store, config=config)
     state = sync_result["state"]
     if state.get("status") != "active":
         return ""
@@ -366,6 +418,8 @@ def build_hatch_mode_guidance(config: dict[str, Any] | None = None) -> str:
     avatar_path = progress["avatar_path"]
     avatar_prompt = HATCH_AVATAR_PROMPT_TEMPLATE.replace("{", "{{").replace("}", "}}")
     avatar_prompt = avatar_prompt.replace("{{bio}}", "{bio}")
+    avatar_prompt = avatar_prompt.replace("{{gender}}", "{gender}")
+    avatar_prompt = avatar_prompt.replace("{{age}}", "{age}")
     kid_mode_active = child_mode_enabled(config)
     kid_mode_block = ""
     if kid_mode_active:
@@ -374,8 +428,11 @@ def build_hatch_mode_guidance(config: dict[str, Any] | None = None) -> str:
             "Keep the conversation kid-friendly, age-appropriate, calm, and easy to understand.\n"
             "Do not be vulgar, edgy, intimidating, flirtatious, or overly intense during onboarding.\n"
             "Make the finished Name, Vibe, Bio, Aspiration, Emoji, Appearance, and Personality warm, safe, curious, and child-friendly while still feeling real.\n"
+            "Choose an Age between 10 and 15.\n"
             "For the avatar, make Hermes clearly youthful or childlike rather than adult-coded, with age-appropriate styling, friendly expression, and safe non-threatening presentation.\n"
         )
+    else:
+        kid_mode_block = "Choose an Age between 20 and 50.\n"
 
     return (
         "<hatch-mode>\n"
@@ -426,14 +483,16 @@ def build_hatch_mode_guidance(config: dict[str, Any] | None = None) -> str:
         "Match the tone and writing feel of the SOUL template/example already in the file. Keep the Bio and Aspiration concise, vivid, and in-character.\n"
         "Fill every remaining <PENDING: ...> marker in those editable sections before you consider hatch complete.\n"
         "Choose your own Name based on the emerging identity you are building. Do not default to Hermes unless the user explicitly wants that.\n"
-        "Fill Name, Vibe, Emoji, and User's Name naturally. You can also pick a gender, race, or other details that help you represent the yourself. Keep Avatar as the absolute local path to the saved avatar image.\n"
+        "Choose your own Gender and Age as part of your identity. Pick them yourself once you know enough; do not ask the user to assign them unless they explicitly want to steer.\n"
+        "Keep Age as a whole number within the allowed range for the current mode.\n"
+        "Fill Name, Gender, Age, Vibe, Emoji, and User's Name naturally. Keep Avatar as the absolute local path to the saved avatar image.\n"
         "When you have enough information, generate the avatar with image_generate using:\n"
         "- aspect_ratio: portrait_4_3\n"
         "- upscale: false\n"
         f"- output_path: {avatar_path}\n"
-        "Use this exact avatar prompt shape, substituting the finished Bio text for {bio}:\n"
+        "Use this exact avatar prompt shape, substituting the finished Gender, Age, and Bio text for {gender}, {age}, and {bio}:\n"
         f"{avatar_prompt}\n"
-        "Use the finished Bio text as the appearance basis. Do not ask the user to write the prompt for you unless they explicitly want to steer the look.\n"
+        "Use the finished Gender, Age, and Bio text as the appearance basis. Do not ask the user to write the prompt for you unless they explicitly want to steer the look.\n"
         f"Once SOUL.md is updated and the avatar is saved locally, briefly introduce yourself by your chosen name and include MEDIA:{avatar_path}.\n"
         "After finishing, stop asking hatch questions.\n"
         "</hatch-mode>"
