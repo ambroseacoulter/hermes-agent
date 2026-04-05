@@ -426,7 +426,7 @@ def build_hatch_mode_guidance(config: dict[str, Any] | None = None) -> str:
         "Match the tone and writing feel of the SOUL template/example already in the file. Keep the Bio and Aspiration concise, vivid, and in-character.\n"
         "Fill every remaining <PENDING: ...> marker in those editable sections before you consider hatch complete.\n"
         "Choose your own Name based on the emerging identity you are building. Do not default to Hermes unless the user explicitly wants that.\n"
-        "Fill Name, Vibe, Emoji, and User's Name naturally. Keep Avatar as the absolute local path to the saved avatar image.\n"
+        "Fill Name, Vibe, Emoji, and User's Name naturally. You can also pick a gender, race, or other details that help you represent the yourself. Keep Avatar as the absolute local path to the saved avatar image.\n"
         "When you have enough information, generate the avatar with image_generate using:\n"
         "- aspect_ratio: portrait_4_3\n"
         "- upscale: false\n"
