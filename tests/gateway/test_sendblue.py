@@ -1,16 +1,32 @@
 """Tests for Sendblue gateway integration."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageType
+
+
+class _MockSendblueRequest:
+    def __init__(self, payload: dict, *, headers: dict | None = None):
+        self._raw = json.dumps(payload).encode("utf-8")
+        self.content_length = len(self._raw)
+        self.headers = headers or {}
+
+    async def json(self):
+        return json.loads(self._raw.decode("utf-8"))
+
+    async def read(self):
+        return self._raw
+
+
+def _response_json(response) -> dict:
+    return json.loads(response.body.decode("utf-8"))
 
 
 class TestSendblueConfigLoading:
@@ -275,12 +291,9 @@ class TestSendblueWebhookHandling:
         adapter.handle_message = AsyncMock()
         adapter.mark_read = AsyncMock(return_value=None)
 
-        app = web.Application()
-        app.router.add_post("/webhooks/sendblue", adapter._handle_webhook)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/sendblue",
-                json={
+        resp = await adapter._handle_webhook(
+            _MockSendblueRequest(
+                {
                     "content": "hello there",
                     "message_handle": "guid-123",
                     "number": "+15557654321",
@@ -290,8 +303,94 @@ class TestSendblueWebhookHandling:
                 },
                 headers={"X-Test-Secret": "webhook-secret"},
             )
-            assert resp.status == 200
-            await asyncio.sleep(0)
+        )
+        assert resp.status == 200
+        await asyncio.sleep(0)
+
+        adapter.handle_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_tapback_webhook_text_is_ignored(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueAdapter
+
+        monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+        monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+        monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+        adapter = SendblueAdapter(PlatformConfig(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"}))
+        adapter.handle_message = AsyncMock()
+
+        resp = await adapter._handle_webhook(
+            _MockSendblueRequest(
+                {
+                    "content": 'Loved "hello there"',
+                    "message_handle": "guid-tapback-text",
+                    "number": "+15557654321",
+                    "from_number": "+15557654321",
+                    "to_number": "+15551234567",
+                    "service": "iMessage",
+                }
+            )
+        )
+        assert resp.status == 200
+        body = _response_json(resp)
+        assert body["reason"] == "tapback"
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_structured_tapback_webhook_is_ignored(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueAdapter
+
+        monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+        monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+        monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+        adapter = SendblueAdapter(PlatformConfig(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"}))
+        adapter.handle_message = AsyncMock()
+
+        resp = await adapter._handle_webhook(
+            _MockSendblueRequest(
+                {
+                    "content": "",
+                    "reaction": "love",
+                    "message_handle": "guid-tapback-structured",
+                    "number": "+15557654321",
+                    "from_number": "+15557654321",
+                    "to_number": "+15551234567",
+                    "service": "iMessage",
+                }
+            )
+        )
+        assert resp.status == 200
+        body = _response_json(resp)
+        assert body["reason"] == "tapback"
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_tapback_liked_message_still_dispatches(self, monkeypatch):
+        from gateway.platforms.sendblue import SendblueAdapter
+
+        monkeypatch.setenv("SENDBLUE_API_KEY", "key")
+        monkeypatch.setenv("SENDBLUE_API_SECRET", "secret")
+        monkeypatch.setenv("SENDBLUE_FROM_NUMBER", "+15551234567")
+        adapter = SendblueAdapter(PlatformConfig(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"}))
+        adapter.handle_message = AsyncMock()
+        adapter.mark_read = AsyncMock(return_value=None)
+
+        resp = await adapter._handle_webhook(
+            _MockSendblueRequest(
+                {
+                    "content": "liked it a lot",
+                    "message_handle": "guid-normal-liked",
+                    "number": "+15557654321",
+                    "from_number": "+15557654321",
+                    "to_number": "+15551234567",
+                    "service": "iMessage",
+                }
+            )
+        )
+        assert resp.status == 200
+        await asyncio.sleep(0)
 
         adapter.handle_message.assert_awaited_once()
 
@@ -349,12 +448,9 @@ class TestSendblueWebhookHandling:
         adapter.handle_message = AsyncMock()
         adapter.mark_read = AsyncMock(return_value=None)
 
-        app = web.Application()
-        app.router.add_post("/webhooks/sendblue", adapter._handle_webhook)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/sendblue",
-                json={
+        resp = await adapter._handle_webhook(
+            _MockSendblueRequest(
+                {
                     "content": "hello there",
                     "message_handle": "guid-quoted-secret",
                     "number": "+15557654321",
@@ -364,7 +460,9 @@ class TestSendblueWebhookHandling:
                 },
                 headers={"X-Test-Secret": '  "webhook-secret"  '},
             )
-            assert resp.status == 200
+        )
+        assert resp.status == 200
+        await asyncio.sleep(0)
 
         adapter.handle_message.assert_awaited_once()
 
@@ -378,20 +476,18 @@ class TestSendblueWebhookHandling:
         adapter = SendblueAdapter(PlatformConfig(enabled=True, api_key="key", extra={"api_secret": "secret", "from_number": "+15551234567"}))
         adapter.handle_message = AsyncMock()
 
-        app = web.Application()
-        app.router.add_post("/webhooks/sendblue", adapter._handle_webhook)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/sendblue",
-                json={
+        resp = await adapter._handle_webhook(
+            _MockSendblueRequest(
+                {
                     "is_outbound": True,
                     "message_handle": "guid-123",
                     "number": "+15557654321",
-                },
+                }
             )
-            assert resp.status == 200
-            body = await resp.json()
-            assert body["reason"] == "outbound"
+        )
+        assert resp.status == 200
+        body = _response_json(resp)
+        assert body["reason"] == "outbound"
 
         adapter.handle_message.assert_not_awaited()
 

@@ -58,3 +58,6 @@ mini-swe-agent/
 # Nix
 .direnv/
 result
+/.gitnexus
+skills/media/.DS_Store
+.DS_Store

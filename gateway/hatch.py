@@ -23,12 +23,8 @@ HATCH_KICKOFF_MESSAGE = "Let's hatch."
 HATCH_RESUME_MESSAGE = "Let's keep hatching."
 HATCH_AVATAR_FILENAME = "hermes-avatar.png"
 HATCH_AVATAR_PROMPT_TEMPLATE = (
-    "Style: 3D render, stylized 3D character portrait, Pixar style, modern 3D animation, "
-    "smooth clay render, matte vinyl toy aesthetic, soft studio lighting, subsurface scattering, "
-    "Octane render, Blender, clean white background, ultra-detailed, 8k resolution. "
-    "Framing and presentation: perfectly centered portrait, direct gaze, face-to-face view, "
-    "shoulder-level composition, isolated on pure white, high-key lighting, minimalist background, "
-    "no text overlays. Identity details: gender {gender}, age {age}. Base apperance on bio: {bio}"
+    "3D Pixar Portrait."
+    "Identity details: gender {gender}, age {age}. Base apperance on bio: {bio}"
 )
 
 _HATCH_STATE_VERSION = 2

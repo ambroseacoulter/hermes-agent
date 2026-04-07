@@ -259,6 +259,52 @@ def _normalize_sendblue_inbound_text(text: str, *, media_present: bool) -> str:
     return stripped
 
 
+_TAPBACK_TEXT_RE = re.compile(
+    r"^(?:liked|loved|disliked|laughed at|emphasized|emphasised|questioned)\s+"
+    r"(?:[\"“].+[\"”]|(?:an?|the)\s+(?:image|photo|picture|video|attachment|message|sticker))$",
+    re.IGNORECASE,
+)
+_TAPBACK_REMOVAL_RE = re.compile(
+    r"^removed\s+(?:a|an)\s+"
+    r"(?:heart|like|thumbs up|thumbs-up|thumbs down|thumbs-down|dislike|laugh|"
+    r"question(?: mark)?|exclamation(?: mark)?|emphasis|emphasized reaction)\s+from\s+"
+    r"(?:[\"“].+[\"”]|(?:an?|the)\s+(?:image|photo|picture|video|attachment|message|sticker))$",
+    re.IGNORECASE,
+)
+_TAPBACK_EMOJI_RE = re.compile(
+    r"^[^\w\s][^\w\s]{0,8}\s+to\s+[\"“].+[\"”]$",
+    re.UNICODE,
+)
+
+
+def _looks_like_tapback_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    if not normalized:
+        return False
+    return bool(
+        _TAPBACK_TEXT_RE.fullmatch(normalized)
+        or _TAPBACK_REMOVAL_RE.fullmatch(normalized)
+        or _TAPBACK_EMOJI_RE.fullmatch(normalized)
+    )
+
+
+def _is_sendblue_tapback_payload(payload: dict[str, Any]) -> bool:
+    for key in ("event_type", "type", "message_type", "webhook_type", "content_type"):
+        value = str(payload.get(key) or "").strip().lower()
+        if value and ("tapback" in value or "reaction" in value):
+            return True
+
+    for key in ("reaction", "tapback", "tapback_type", "reaction_type"):
+        if str(payload.get(key) or "").strip():
+            return True
+
+    service = str(payload.get("service") or "").strip().lower()
+    if service and service != "imessage":
+        return False
+
+    return _looks_like_tapback_text(str(payload.get("content") or ""))
+
+
 def _has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -866,10 +912,6 @@ class SendblueAdapter(BasePlatformAdapter):
             logger.error("[sendblue] webhook parse error: %s", exc)
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
-        event_id = self._build_event_id(payload)
-        if self._is_duplicate_event(event_id):
-            return web.json_response({"status": "duplicate", "event_id": event_id}, status=200)
-
         if payload.get("is_outbound"):
             logger.debug("[sendblue] ignoring outbound webhook %s", payload.get("message_handle"))
             return web.json_response({"status": "ignored", "reason": "outbound"}, status=200)
@@ -881,6 +923,14 @@ class SendblueAdapter(BasePlatformAdapter):
                 bool(payload.get("is_typing")),
             )
             return web.json_response({"status": "ok", "event": "typing_indicator"}, status=200)
+
+        if _is_sendblue_tapback_payload(payload):
+            logger.debug("[sendblue] ignoring tapback webhook %s", payload.get("message_handle"))
+            return web.json_response({"status": "ignored", "reason": "tapback"}, status=200)
+
+        event_id = self._build_event_id(payload)
+        if self._is_duplicate_event(event_id):
+            return web.json_response({"status": "duplicate", "event_id": event_id}, status=200)
 
         try:
             event = await self._build_message_event(payload)
